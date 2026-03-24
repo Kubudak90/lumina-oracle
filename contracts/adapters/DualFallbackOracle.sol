@@ -9,12 +9,12 @@ import { IERC20 } from "../interfaces/IERC20.sol";
 import { IACLManager } from "../interfaces/IACLManager.sol";
 
 ///@title DualFallbackOracle
-///@author HyperLend
+///@author LightLend
 ///@notice An dual-oracle system with fallback in case of main oracle outage
 /* Contract has 3 possible oracles:
     - primary: used most of the time
     - fallback: used if primary is unhealthy
-    - emergency: used when manually toggled by HyperLend poolAdmin / emergencyAdmin / riskAdmin
+    - emergency: used when manually toggled by LightLend poolAdmin / emergencyAdmin / riskAdmin
 
     If primary is healthy (price > 0 && data age < MAX_INTERVAL), return primary prices.
     Otherwise, check if fallback is healthy:
@@ -27,7 +27,7 @@ import { IACLManager } from "../interfaces/IACLManager.sol";
         - emergency: kHYPE-fundamental-redstone (if we think kHYPE might depeg on secondary markets but there are no underlying issues (like 10/10 crash), we can switch using emergency multisig without having to go through 3h timelock))
 */
 contract DualFallbackOracle is IAdapter {
-    /// @notice HyperLend ACL Manager contract
+    /// @notice LightLend ACL Manager contract
     IACLManager public aclManager;
 
     /// @notice main price source, used most of the time
@@ -50,8 +50,8 @@ contract DualFallbackOracle is IAdapter {
 
     /// @notice idicates if emergency oracle is being used
     bool public isEmergencyOracleEnabled;
-    
-    /// @notice thrown if caller is not poolAdmin / emergencyAdmin / riskAdmin on HyperLend ACLManager
+
+    /// @notice thrown if caller is not poolAdmin / emergencyAdmin / riskAdmin on LightLend ACLManager
     error NotAdmin();
     /// @notice thrown when address(0) is used
     error InvalidAddress();
@@ -66,16 +66,16 @@ contract DualFallbackOracle is IAdapter {
     /// @param _primarySource chainlink-compatible price oracle, used most of the time
     /// @param _fallbackSource chainlink-compatible price oracle, used when main is not available
     /// @param _emergencySource chainlink-compatible price oracle which can be toggled by risk admin
-    /// @param _aclManager HyperLend ACL Manager contract
+    /// @param _aclManager LightLend ACL Manager contract
     /// @param _description the description of the price source
     /// @param _maxIntervalPrimary maximum allowed time since the last price update for primary oracle
     /// @param _maxIntervalFallback maximum allowed time since the last price update for fallback oracle
     constructor(
-        address _primarySource, 
-        address _fallbackSource, 
+        address _primarySource,
+        address _fallbackSource,
         address _emergencySource,
         address _aclManager,
-        string memory _description, 
+        string memory _description,
         uint256 _maxIntervalPrimary,
         uint256 _maxIntervalFallback
     ) {
@@ -113,14 +113,14 @@ contract DualFallbackOracle is IAdapter {
         return answer;
     }
 
-    /// @notice returns the latest price in chainlink-compatible format 
+    /// @notice returns the latest price in chainlink-compatible format
     function latestRoundData() external view returns (
         uint80 roundId,
         int256 answer,
         uint256 startedAt,
         uint256 updatedAt,
         uint80 answeredInRound
-    ){  
+    ){
         return getData();
     }
 
@@ -141,7 +141,8 @@ contract DualFallbackOracle is IAdapter {
                 uint80 _answeredInRoundEmergency
             ) = EMERGENCY_SOURCE.latestRoundData();
 
-            if (_answerEmergency <= 0) revert InvalidEmergencyOracleData();
+            require(_answerEmergency > 0, "emergency: invalid price");
+            require(block.timestamp - _updatedAtEmergency < MAX_HEARTBEAT_INTERVAL_PRIMARY, "emergency: stale");
 
             return (_roundIdEmergency, _answerEmergency, _startedAtEmergency, _updatedAtEmergency, _answeredInRoundEmergency);
         }
@@ -156,9 +157,21 @@ contract DualFallbackOracle is IAdapter {
         ) = _safeLatestRoundData(PRIMARY_SOURCE);
 
         //if primary isn't healthy, we first check if the fallback is also unhealthy
-        //if both are unhealthy, we return primary prices
-        //otherwise, we return fallback
         if (!_isPrimaryHealthy(_success, _answer, _updatedAt)){
+            if (!_success) {
+                // Primary reverted -- only use fallback if it's genuinely healthy
+                (
+                    ,
+                    int256 _fbAnswer,
+                    ,
+                    uint256 _fbUpdatedAt,
+
+                ) = FALLBACK_SOURCE.latestRoundData();
+
+                require(_isFallbackHealthy(_fbAnswer, _fbUpdatedAt), "both oracles unhealthy");
+                return (0, _fbAnswer, 0, _fbUpdatedAt, 0);
+            }
+
             //we don't use _safeLatestRoundData here, since we want the tx to revert if both oracles revert
             (
                 uint80 _roundIdFallback,
@@ -169,7 +182,7 @@ contract DualFallbackOracle is IAdapter {
             ) = FALLBACK_SOURCE.latestRoundData();
 
             //if fallback is also unhealthy, but data is less stale than primary, return fallback data
-            if (_isFallbackHealthy(_answerFallback, _updatedAtFallback) || _updatedAtFallback > _updatedAt){
+            if (_isFallbackHealthy(_answerFallback, _updatedAtFallback) || (_answerFallback > 0 && _updatedAtFallback > _updatedAt)){
                 return (_roundIdFallback, _answerFallback, _startedAtFallback, _updatedAtFallback, _answeredInRoundFallback);
             }
         }
@@ -184,11 +197,11 @@ contract DualFallbackOracle is IAdapter {
 
     /// @notice calls latestRoundData on source contract, without reverting the whole tx if the call reverts
     function _safeLatestRoundData(IOracle source) internal view returns (
-        bool success, 
-        uint80 r, 
-        int256 a, 
-        uint256 s, 
-        uint256 u, 
+        bool success,
+        uint80 r,
+        int256 a,
+        uint256 s,
+        uint256 u,
         uint80 ar
     ){
         try source.latestRoundData() returns (
@@ -205,7 +218,7 @@ contract DualFallbackOracle is IAdapter {
     }
 
     function _isPrimaryHealthy(bool _success, int256 _answer, uint256 _updatedAt) internal view returns (bool){
-        if (!_success) return false; 
+        if (!_success) return false;
 
         if (_answer <= 0){
             return false;

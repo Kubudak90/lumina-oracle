@@ -13,18 +13,22 @@ import {IFeeManager} from "./interfaces/IFeeManager.sol";
 using SafeERC20 for IERC20;
 
 /// @title ChainlinkConsumer
-/// @author HyperLend
+/// @author LightLend
 /// @notice Contract collecting and verifying Chainlink Data Streams
 /// @dev Exposes latest price and timestamp for each feedId, which is then consumed by SingleFeedProvider.sol
 contract ChainlinkConsumer {
     /// @notice Thrown when a caller tries to execute a function that is restricted to the contract's owner.
     error NotOwner(address caller);
+    /// @notice Thrown when a caller is not a keeper or owner.
+    error NotKeeper(address caller);
     /// @notice Thrown when an unsupported report version is provided to verifyReport.
     error InvalidReportVersion(uint16 version);
     /// @notice Thrown if RWA market is not open
     error MarketNotOpen(bytes32 feedId, uint32 marketStatus);
     /// @notice Thrown if new timestamp would be older than the previous timestamp
     error OldData(bytes32 feedId, uint256 reportTimestamp, uint256 previousTimestamp);
+    /// @notice Thrown if the verified price is invalid
+    error InvalidPrice(bytes32 feedId, int192 price);
 
     /**
      * @dev Represents a data report from a Data Streams stream for v3 schema (crypto streams).
@@ -35,7 +39,7 @@ contract ChainlinkConsumer {
         bytes32 feedId; // The stream ID the report has data for.
         uint32 validFromTimestamp; // Earliest timestamp for which price is applicable.
         uint32 observationsTimestamp; // Latest timestamp for which price is applicable.
-        uint192 nativeFee; // Base cost to validate a transaction using the report, denominated in the chain’s native token (e.g., WETH/ETH).
+        uint192 nativeFee; // Base cost to validate a transaction using the report, denominated in the chain's native token (e.g., WETH/ETH).
         uint192 linkFee; // Base cost to validate a transaction using the report, denominated in LINK.
         uint32 expiresAt; // Latest timestamp where the report can be verified onchain.
         int192 price; // DON consensus median price (8 or 18 decimals).
@@ -53,7 +57,7 @@ contract ChainlinkConsumer {
         bytes32 feedId; // The stream ID the report has data for.
         uint32 validFromTimestamp; // Earliest timestamp for which price is applicable.
         uint32 observationsTimestamp; // Latest timestamp for which price is applicable.
-        uint192 nativeFee; // Base cost to validate a transaction using the report, denominated in the chain’s native token (e.g., WETH/ETH).
+        uint192 nativeFee; // Base cost to validate a transaction using the report, denominated in the chain's native token (e.g., WETH/ETH).
         uint192 linkFee; // Base cost to validate a transaction using the report, denominated in LINK.
         uint32 expiresAt; // Latest timestamp where the report can be verified onchain.
         int192 price; // DON consensus median benchmark price (8 or 18 decimals).
@@ -70,9 +74,13 @@ contract ChainlinkConsumer {
     mapping(bytes32 => int192) public lastDecodedPrice;
     /// @notice Stores the last decoded timestamp from a verified report for each feedId
     mapping(bytes32 => uint256) public lastDecodedTimestamp;
+    /// @notice Stores the keeper whitelist
+    mapping(address => bool) public isKeeper;
 
     /// @notice Event emitted when a report is successfully verified and decoded.
     event DecodedReport(bytes32 feedId, int192 price, uint256 timestamp);
+    /// @notice Event emitted when a keeper is added or removed.
+    event KeeperUpdated(address keeper, bool status);
 
     /// @param _verifierProxy The address of the VerifierProxy contract.
     /// @dev You can find these addresses on https://docs.chain.link/data-streams/crypto-streams.
@@ -85,6 +93,20 @@ contract ChainlinkConsumer {
     modifier onlyOwner() {
         if (msg.sender != s_owner) revert NotOwner(msg.sender);
         _;
+    }
+
+    /// @notice Checks if the caller is a keeper or the owner.
+    modifier onlyKeeper() {
+        if (!isKeeper[msg.sender] && msg.sender != s_owner) revert NotKeeper(msg.sender);
+        _;
+    }
+
+    /// @notice Sets or removes a keeper
+    /// @param _keeper The address of the keeper
+    /// @param _status Whether the address should be a keeper
+    function setKeeper(address _keeper, bool _status) external onlyOwner {
+        isKeeper[_keeper] = _status;
+        emit KeeperUpdated(_keeper, _status);
     }
 
     /**
@@ -106,7 +128,7 @@ contract ChainlinkConsumer {
      * @param unverifiedReport The encoded report data to be verified, including the signed report and metadata.
      * @custom:reverts InvalidReportVersion(uint8 version) Thrown when an unsupported report version is provided.
      */
-    function verifyReport(bytes memory unverifiedReport) public payable {
+    function verifyReport(bytes memory unverifiedReport) public payable onlyKeeper {
         // Decode unverified report to extract report data
         (, bytes memory reportData) = abi.decode(
             unverifiedReport,
@@ -139,6 +161,9 @@ contract ChainlinkConsumer {
                 (ReportV3)
             );
 
+            // Validate price
+            if (verifiedReport.price <= 0) revert InvalidPrice(verifiedReport.feedId, verifiedReport.price);
+
             // Calculate the average timestamp and revert if it's older than the last verified timestamp
             uint256 avgTimestamp = (verifiedReport.validFromTimestamp + verifiedReport.observationsTimestamp) / 2;
             if (lastDecodedTimestamp[verifiedReport.feedId] >= avgTimestamp){
@@ -157,7 +182,10 @@ contract ChainlinkConsumer {
                 verifiedReportData,
                 (ReportV4)
             );
-            
+
+            // Validate price
+            if (verifiedReport.price <= 0) revert InvalidPrice(verifiedReport.feedId, verifiedReport.price);
+
             // Revert if the market status is not `Open`
             if (verifiedReport.marketStatus != 2){
                 revert MarketNotOpen(verifiedReport.feedId, verifiedReport.marketStatus);
@@ -212,7 +240,7 @@ contract ChainlinkConsumer {
 
     /// @notice verify multipler reports in one transactions
     /// @param batch an array of DON reports
-    function verifyBatch(bytes[] memory batch) external {
+    function verifyBatch(bytes[] memory batch) external onlyKeeper {
         for (uint256 i = 0; i < batch.length; i++){
             verifyReport(batch[i]);
         }

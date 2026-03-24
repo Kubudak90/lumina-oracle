@@ -15,7 +15,7 @@ interface IstHYPE {
 }
 
 ///@title wStHypeAdapter
-///@author HyperLend
+///@author LightLend
 ///@notice An adapter returning price of wrapped staked HYPE (wstHYPE), based on underlying asset
 contract StHypeAdapter is Ownable, IAdapter {
     /// @notice contract providing price of the underlying asset

@@ -20,15 +20,19 @@ contract ERC4626Adapter is Ownable, IAdapter {
     uint8 public decimals;
     /// @notice address of the underlying IERC4626-compatible asset
     IERC4626 public asset;
+    ///@notice maximum allowed staleness for price feed
+    uint256 public immutable MAX_STALENESS;
 
     /// @param _priceProvider contract providing price of the underlying asset
     /// @param _description the description of the price source
     /// @param _asset address of the underlying asset
-    constructor(address _priceProvider, string memory _description, address _asset) Ownable(msg.sender) {
+    /// @param _maxStaleness maximum allowed staleness in seconds
+    constructor(address _priceProvider, string memory _description, address _asset, uint256 _maxStaleness) Ownable(msg.sender) {
         priceProvider = IOracle(_priceProvider);
         description = _description;
         decimals = priceProvider.decimals();
         asset = IERC4626(_asset);
+        MAX_STALENESS = _maxStaleness;
     }
 
     /// @notice returns the latest price
@@ -37,14 +41,14 @@ contract ERC4626Adapter is Ownable, IAdapter {
         return answer;
     }
 
-    /// @notice returns the latest price in chainlink-compatible format 
+    /// @notice returns the latest price in chainlink-compatible format
     function latestRoundData() external view returns (
         uint80 roundId,
         int256 answer,
         uint256 startedAt,
         uint256 updatedAt,
         uint80 answeredInRound
-    ){  
+    ){
         return getData();
     }
 
@@ -63,9 +67,16 @@ contract ERC4626Adapter is Ownable, IAdapter {
             uint80 _answeredInRound
         ) = priceProvider.latestRoundData();
 
+        require(_answer > 0, "price <= 0");
+        require(block.timestamp - _updatedAt < MAX_STALENESS, "price stale");
+
         //get assets per 1 vault token (accounting for decimals)
         uint256 baseShareAmount = 10 ** asset.decimals();
         uint256 assetPerBaseShare = asset.convertToAssets(baseShareAmount);
+
+        require(assetPerBaseShare > 0, "ratio is 0");
+        // Sanity: ratio should not be more than 10x base (protection against donation attacks)
+        require(assetPerBaseShare <= baseShareAmount * 10, "ratio too high");
 
         //calculate the price of 1 vault token
         answer = _answer * int256(assetPerBaseShare) / int256(baseShareAmount);

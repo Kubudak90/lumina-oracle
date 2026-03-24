@@ -15,17 +15,27 @@ interface IAccountant {
 
 contract wHlpAdapter {
     /// @notice contract providing price of the quote asset
-    IOracle public priceProvider = IOracle(0xa19b7fE6FFd492dd84ADF38D37B974Cb52f40267);
+    IOracle public priceProvider;
     /// @notice wHLP accountant contract
-    IAccountant public accountant = IAccountant(0x470bd109A24f608590d85fc1f5a4B6e625E8bDfF);
+    IAccountant public accountant;
 
     /// @notice address of the quote asset (USDhl)
-    address public quoteAsset = 0xb50A96253aBDF803D85efcDce07Ad8becBc52BD5;
+    address public quoteAsset;
     /// @notice decimals of the wHLP/USDhl ratio
     uint256 public ratioDecimals;
+    ///@notice maximum allowed staleness for price feed
+    uint256 public immutable MAX_STALENESS;
 
-    constructor() {
+    /// @param _priceProvider contract providing price of the quote asset
+    /// @param _accountant wHLP accountant contract
+    /// @param _quoteAsset address of the quote asset (USDhl)
+    /// @param _maxStaleness maximum allowed staleness in seconds
+    constructor(address _priceProvider, address _accountant, address _quoteAsset, uint256 _maxStaleness) {
+        priceProvider = IOracle(_priceProvider);
+        accountant = IAccountant(_accountant);
+        quoteAsset = _quoteAsset;
         ratioDecimals = accountant.decimals();
+        MAX_STALENESS = _maxStaleness;
     }
 
     function decimals() external view returns (uint8){
@@ -38,14 +48,14 @@ contract wHlpAdapter {
         return answer;
     }
 
-    /// @notice returns the latest price in chainlink-compatible format 
+    /// @notice returns the latest price in chainlink-compatible format
     function latestRoundData() external view returns (
         uint80 roundId,
         int256 answer,
         uint256 startedAt,
         uint256 updatedAt,
         uint80 answeredInRound
-    ){  
+    ){
         return getData();
     }
 
@@ -66,9 +76,11 @@ contract wHlpAdapter {
             uint80 _answeredInRound
         ) = priceProvider.latestRoundData();
         require(_answer > 0, "price <= 0");
+        require(block.timestamp - _updatedAt < MAX_STALENESS, "price stale");
 
         //get the wHLP/USDhl ratio
         uint256 _ratioAnswer = accountant.getRateInQuoteSafe(quoteAsset);
+        require(_ratioAnswer > 0, "ratio <= 0");
 
         answer = _answer * int256(_ratioAnswer) / int256(10**ratioDecimals);
 

@@ -18,11 +18,11 @@ interface IkmHYPE {
 }
 
 interface IManager {
-    function EXLSTToHYPE(uint256 shares) external view returns (uint256); 
+    function EXLSTToHYPE(uint256 shares) external view returns (uint256);
 }
 
 ///@title kmHypeAdapterFundamental
-///@author HyperLend
+///@author LightLend
 ///@notice An adapter returning price of kmHYPE (by Kinetiq), based on underlying asset
 contract kmHypeAdapterFundamental is Ownable, IAdapter {
     /// @notice contract providing price of the underlying asset
@@ -38,18 +38,23 @@ contract kmHypeAdapterFundamental is Ownable, IAdapter {
     IManager public manager;
     ///@notice decimals of the ratio oracle
     uint8 public ratioDecimals;
+    ///@notice maximum allowed staleness for price feed
+    uint256 public immutable MAX_STALENESS;
 
     /// @param _priceProvider contract providing price of the underlying asset
     /// @param _description the description of the price source
     /// @param _asset address of the underlying asset
     /// @param _ratioDecimals number of decimal places for kmHYPE/HYPE ratio
-    constructor(address _priceProvider, string memory _description, address _asset, uint8 _ratioDecimals, address _manager) Ownable(msg.sender) {
+    /// @param _manager address of the EX Manager
+    /// @param _maxStaleness maximum allowed staleness in seconds
+    constructor(address _priceProvider, string memory _description, address _asset, uint8 _ratioDecimals, address _manager, uint256 _maxStaleness) Ownable(msg.sender) {
         priceProvider = IOracle(_priceProvider);
         description = _description;
         decimals = priceProvider.decimals();
         asset = IkmHYPE(_asset);
         ratioDecimals = _ratioDecimals;
         manager = IManager(_manager);
+        MAX_STALENESS = _maxStaleness;
     }
 
     /// @notice returns the latest price
@@ -58,14 +63,14 @@ contract kmHypeAdapterFundamental is Ownable, IAdapter {
         return answer;
     }
 
-    /// @notice returns the latest price in chainlink-compatible format 
+    /// @notice returns the latest price in chainlink-compatible format
     function latestRoundData() external view returns (
         uint80 roundId,
         int256 answer,
         uint256 startedAt,
         uint256 updatedAt,
         uint80 answeredInRound
-    ){  
+    ){
         return getData();
     }
 
@@ -84,6 +89,7 @@ contract kmHypeAdapterFundamental is Ownable, IAdapter {
             uint80 _answeredInRound
         ) = priceProvider.latestRoundData();
         require(_answer > 0, "price <= 0");
+        require(block.timestamp - _updatedAt < MAX_STALENESS, "price stale");
 
         //get the kmHYPE/HYPE ratio with 18 decimals
         int256 _ratioAnswer = getRatio();
@@ -98,6 +104,9 @@ contract kmHypeAdapterFundamental is Ownable, IAdapter {
     }
 
     function getRatio() public view returns (int256) {
-        return int256(manager.EXLSTToHYPE(1_000_000_000_000_000_000));
+        uint256 ratio = manager.EXLSTToHYPE(1_000_000_000_000_000_000);
+        require(ratio > 0, "ratio is 0");
+        require(ratio <= 2e18, "ratio too high");
+        return int256(ratio);
     }
 }

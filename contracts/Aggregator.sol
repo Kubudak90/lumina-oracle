@@ -7,28 +7,31 @@ import { ISystemOracle } from "./interfaces/ISystemOracle.sol";
 
 ///@title Aggregator
 ///@author fbsloXBT
-///@notice A price oracle aggregator for HyperEVM. 
+///@notice A price oracle aggregator for LighterEVM.
 ///@dev There are 2 types of assets:
 /// - perp-oracle assets where HL SystemOracle has the oracle price (submitted by L1 validators).
 /// - assets, where price is provided by an off-chain keepers (and then exponential moving average is used)
 contract Aggregator is Ownable {
-    ///@notice Hyperliquid L1 system oracle
-    ISystemOracle public systemOracle = ISystemOracle(0x1111111111111111111111111111111111111111);
+    ///@notice Lightlend L1 system oracle
+    ISystemOracle public systemOracle;
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                         CONSTANTS                          */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
 
     ///@notice maximum allowed age of the price data submitted by keepers
-    uint256 public MAX_TIMESTAMP_DELAY_SECONDS = 1 minutes;
+    uint256 public immutable MAX_TIMESTAMP_DELAY_SECONDS;
     ///@notice maxumum allowed time between rounds, then getPrice() reverts
-    uint256 public MAX_EMA_STALE_SECONDS = 20 minutes;
+    uint256 public immutable MAX_EMA_STALE_SECONDS;
     ///@notice exponential moving average window in seconds
-    int256 public EMA_WINDOW_SECONDS = 866; //600 / ln(2)
+    int256 public immutable EMA_WINDOW_SECONDS;
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    ///@notice maximum allowed single-update price deviation from current EMA (in basis points)
+    uint256 public constant MAX_PRICE_DEVIATION_BPS = 2000; // 20%
+
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                         MAPPINGS                           */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
 
     ///@notice information about certain asset
     ///@dev first variables are packed in one slot
@@ -48,9 +51,9 @@ contract Aggregator is Ownable {
     ///@notice mapping of whitelisted keepers who can submit prices
     mapping(address => bool) public keepers;
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                          EVENTS                            */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
 
     ///@notice event emmited when an asset is added or updated
     event AssetChanged(address indexed _asset, bool _isPerpOracle, uint32 indexed _metaIndex, uint32 _metaDecimals, uint256 _price, bool _isUpdate);
@@ -59,9 +62,9 @@ contract Aggregator is Ownable {
     ///@notice event emmited when a keeper is added or removed
     event KeeperUpdated(address _keeper, bool _newState);
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                        MODIFIERS                           */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
 
     ///@notice modifier allowing only whitelisted keepers to call functions
     modifier onlyKeeper(){
@@ -69,11 +72,16 @@ contract Aggregator is Ownable {
       _;
     }
 
-    constructor() Ownable(msg.sender) {}
+    constructor(address _systemOracle) Ownable(msg.sender) {
+        systemOracle = ISystemOracle(_systemOracle);
+        MAX_TIMESTAMP_DELAY_SECONDS = 1 minutes;
+        MAX_EMA_STALE_SECONDS = 20 minutes;
+        EMA_WINDOW_SECONDS = 866;
+    }
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                       READ-ONLY                            */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
 
     ///@notice function used to read the latest price data
     ///@param _asset address of the asset
@@ -104,9 +112,9 @@ contract Aggregator is Ownable {
         }
     }
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                       AUTH-ONLY                            */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
 
     ///@notice function used to add or update supported assets
     ///@param _asset address of the asset
@@ -115,9 +123,19 @@ contract Aggregator is Ownable {
     ///@param _metaDecimals number of decimals of price in SystemOracle data (only for perp-oracle assets: price = x / Math.pow(10, 6 - decimals))
     ///@param _isUpdate indicates if asset is being added or updated
     function setAsset(address _asset, bool _isPerpOracle, uint32 _metaIndex, uint32 _metaDecimals, uint256 _price, bool _isUpdate) external onlyOwner() {
+        require(_metaDecimals <= 6, "metaDecimals > 6");
+
         if (!_isUpdate) {
             require(assetDetails[_asset].exists == false, "setAsset: asset already exists");
             require(metaIndexes[_metaIndex] == address(0), "setAsset: metaIndex already exists");
+        } else {
+            require(assetDetails[_asset].exists, "asset does not exist");
+            // If metaIndex changed, verify new index is not taken by another asset
+            if (assetDetails[_asset].metaIndex != _metaIndex) {
+                require(metaIndexes[_metaIndex] == address(0), "metaIndex in use");
+                metaIndexes[assetDetails[_asset].metaIndex] = address(0); // clear old
+                metaIndexes[_metaIndex] = _asset;
+            }
         }
 
         assetDetails[_asset] = AssetDetails({
@@ -151,7 +169,8 @@ contract Aggregator is Ownable {
         require(_assets.length == _prices.length, "submitRoundData: length mismatch");
 
         for (uint256 i = 0; i < _assets.length; i++){
-            //even if the asset is not added yet, we can write the price, since reading it will revert
+            require(_prices[i] > 0, "price must be > 0");
+            require(_submitTimestamp > assetDetails[_assets[i]].lastTimestamp, "timestamp not monotonic");
             _calculateEma(_assets[i], _prices[i]);
         }
 
@@ -160,13 +179,14 @@ contract Aggregator is Ownable {
 
     function deleteAsset(address _asset) external onlyOwner() {
         require(assetDetails[_asset].exists, "deleteAsset: asset doesn't exist");
+        metaIndexes[assetDetails[_asset].metaIndex] = address(0);
         assetDetails[_asset].exists = false;
     }
 
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                   INTERNAL HELPERS                         */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
 
     ///@notice helper function used to calculate new EMA when price is added
     ///@dev we are using calculation for unevenly spaced time series
@@ -176,11 +196,22 @@ contract Aggregator is Ownable {
         uint256 lastTimestamp = assetInfo.lastTimestamp;
         uint256 currentEma = assetInfo.ema;
 
+        // Circuit breaker: reject if new price deviates > 20% from current EMA
+        if (currentEma > 0) {
+            uint256 deviation;
+            if (_price > currentEma) {
+                deviation = ((_price - currentEma) * 10000) / currentEma;
+            } else {
+                deviation = ((currentEma - _price) * 10000) / currentEma;
+            }
+            require(deviation <= MAX_PRICE_DEVIATION_BPS, "price deviation too large");
+        }
+
         //Andreas Eckner (2010): Algorithms for Unevenly Spaced Time Series: Moving Averages and Other Rolling Operators
         int256 x = -int256(int256(block.timestamp - lastTimestamp) * 10**18 / EMA_WINDOW_SECONDS);
         int256 alpha = FixedPointMathLib.expWad(x);
         uint256 newEma = uint256((int256(currentEma) * alpha + int256(_price) * (10**18 - alpha)) / 10**18);
-        
+
         assetDetails[_asset].lastTimestamp = block.timestamp;
         assetDetails[_asset].ema = newEma;
     }

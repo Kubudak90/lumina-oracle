@@ -31,27 +31,23 @@ contract AssetOracleAdapter is Ownable, IAdapter {
     }
 
     /// @notice returns the latest price from the aggregator
-    function latestAnswer() external view returns (int256) {
-        return int256(aggregator.getPrice(asset));
+    function latestAnswer() public view returns (int256) {
+        uint256 price = aggregator.getPrice(asset);
+        require(price > 0, "invalid price");
+        return int256(price);
     }
 
-    /// @notice returns the latest price in chainlink-compatible format 
+    /// @notice returns the latest price in chainlink-compatible format
     function latestRoundData() external view returns (
         uint80 roundId,
         int256 answer,
         uint256 startedAt,
         uint256 updatedAt,
         uint80 answeredInRound
-    ){  
-        uint256 lastUpdate = block.timestamp;
-        try aggregator.getUpdateTimestamp(asset) returns (uint256 l) {
-            lastUpdate = l;
-        } catch { }
-        
-        roundId = 0;
-        answer = int256(aggregator.getPrice(asset));
-        startedAt = lastUpdate;
-        updatedAt = lastUpdate;
-        answeredInRound = 0;
+    ){
+        int256 price = latestAnswer();
+        require(price > 0, "invalid price");
+        uint256 lastUpdate = aggregator.getUpdateTimestamp(asset);
+        return (0, price, lastUpdate, lastUpdate, 0);
     }
 }
