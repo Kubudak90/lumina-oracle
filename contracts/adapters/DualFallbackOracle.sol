@@ -185,6 +185,8 @@ contract DualFallbackOracle is IAdapter {
             if (_isFallbackHealthy(_answerFallback, _updatedAtFallback) || (_answerFallback > 0 && _updatedAtFallback > _updatedAt)){
                 return (_roundIdFallback, _answerFallback, _startedAtFallback, _updatedAtFallback, _answeredInRoundFallback);
             }
+
+            revert("both oracles unhealthy");
         }
 
         //return round data from the main source

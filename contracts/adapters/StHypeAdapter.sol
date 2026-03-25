@@ -31,18 +31,22 @@ contract StHypeAdapter is Ownable, IAdapter {
     IstHYPE public asset;
     ///@notice decimals of the ratio oracle
     uint8 public ratioDecimals;
+    /// @notice Maximum allowed staleness for price feed
+    uint256 public immutable MAX_STALENESS;
 
     /// @param _priceProvider contract providing price of the underlying asset
     /// @param _description the description of the price source
     /// @param _asset address of the underlying asset
     /// @param _ratioProvider contract providing the ratio between wrapped and underlying asset
-    constructor(address _priceProvider, string memory _description, address _asset, address _ratioProvider) Ownable(msg.sender) {
+    /// @param _maxStaleness maximum allowed staleness in seconds
+    constructor(address _priceProvider, string memory _description, address _asset, address _ratioProvider, uint256 _maxStaleness) Ownable(msg.sender) {
         priceProvider = IOracle(_priceProvider);
         description = _description;
         decimals = priceProvider.decimals();
         asset = IstHYPE(_asset);
         ratioProvider = IOracle(_ratioProvider);
         ratioDecimals = ratioProvider.decimals();
+        MAX_STALENESS = _maxStaleness;
     }
 
     /// @notice returns the latest price
@@ -77,8 +81,11 @@ contract StHypeAdapter is Ownable, IAdapter {
             uint80 _answeredInRound
         ) = priceProvider.latestRoundData();
         require(_answer > 0, "price <= 0");
+        require(block.timestamp - _updatedAt < MAX_STALENESS, "price stale");
 
         (, int256 _ratioAnswer ,,,) = ratioProvider.latestRoundData();
+        require(_ratioAnswer > 0, "ratio <= 0");
+        require(uint256(_ratioAnswer) <= 2e18, "ratio too high");
 
         answer = _answer * _ratioAnswer / int256(10**ratioDecimals);
 

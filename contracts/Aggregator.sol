@@ -29,6 +29,9 @@ contract Aggregator is Ownable {
     ///@notice maximum allowed single-update price deviation from current EMA (in basis points)
     uint256 public constant MAX_PRICE_DEVIATION_BPS = 2000; // 20%
 
+    /// @notice Maximum staleness for perp oracle prices
+    uint256 public constant MAX_PERP_STALE_SECONDS = 300;
+
     /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                         MAPPINGS                           */
     /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
@@ -50,6 +53,9 @@ contract Aggregator is Ownable {
     mapping(address => AssetDetails) public assetDetails;
     ///@notice mapping of whitelisted keepers who can submit prices
     mapping(address => bool) public keepers;
+
+    /// @notice Last update timestamp for perp oracle prices
+    mapping(address => uint256) public perpLastUpdateTimestamp;
 
     /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                          EVENTS                            */
@@ -106,7 +112,7 @@ contract Aggregator is Ownable {
         AssetDetails memory _assetInfo = assetDetails[_asset];
 
         if (_assetInfo.isPerpOracle){
-            return block.timestamp;
+            return perpLastUpdateTimestamp[_asset] > 0 ? perpLastUpdateTimestamp[_asset] : block.timestamp;
         } else {
             return _assetInfo.lastTimestamp;
         }
@@ -124,12 +130,23 @@ contract Aggregator is Ownable {
     ///@param _isUpdate indicates if asset is being added or updated
     function setAsset(address _asset, bool _isPerpOracle, uint32 _metaIndex, uint32 _metaDecimals, uint256 _price, bool _isUpdate) external onlyOwner() {
         require(_metaDecimals <= 6, "metaDecimals > 6");
+        require(_price > 0, "price must be > 0");
 
         if (!_isUpdate) {
             require(assetDetails[_asset].exists == false, "setAsset: asset already exists");
             require(metaIndexes[_metaIndex] == address(0), "setAsset: metaIndex already exists");
         } else {
             require(assetDetails[_asset].exists, "asset does not exist");
+            uint256 _currentEma = assetDetails[_asset].ema;
+            if (_currentEma > 0) {
+                uint256 _deviation;
+                if (_price > _currentEma) {
+                    _deviation = ((_price - _currentEma) * 10000) / _currentEma;
+                } else {
+                    _deviation = ((_currentEma - _price) * 10000) / _currentEma;
+                }
+                require(_deviation <= MAX_PRICE_DEVIATION_BPS, "setAsset: price deviation too large");
+            }
             // If metaIndex changed, verify new index is not taken by another asset
             if (assetDetails[_asset].metaIndex != _metaIndex) {
                 require(metaIndexes[_metaIndex] == address(0), "metaIndex in use");
@@ -157,6 +174,14 @@ contract Aggregator is Ownable {
     function toggleKeeper(address _keeper) external onlyOwner() {
         keepers[_keeper] = !keepers[_keeper];
         emit KeeperUpdated(_keeper, keepers[_keeper]);
+    }
+
+    /// @notice Update perp oracle timestamps (called by keeper when system oracle updates)
+    function updatePerpTimestamps(address[] calldata _assets) external onlyKeeper() {
+        for (uint256 i = 0; i < _assets.length; i++) {
+            require(assetDetails[_assets[i]].exists && assetDetails[_assets[i]].isPerpOracle, "not a perp asset");
+            perpLastUpdateTimestamp[_assets[i]] = block.timestamp;
+        }
     }
 
     ///@notice function used to submit a batch of prices
@@ -220,10 +245,17 @@ contract Aggregator is Ownable {
     function _getPerpOraclePrice(address _asset) internal view returns (uint256) {
         AssetDetails memory assetInfo = assetDetails[_asset];
 
+        // Enforce staleness check for perp oracle
+        uint256 lastUpdate = perpLastUpdateTimestamp[_asset];
+        if (lastUpdate > 0) {
+            require(block.timestamp - lastUpdate < MAX_PERP_STALE_SECONDS, "perp oracle stale");
+        }
+
         uint256[] memory oraclePrices = systemOracle.getOraclePxs();
         uint256 _metaIndex = assetInfo.metaIndex;
 
         uint256 _price = oraclePrices[_metaIndex];
+        require(_price > 0, "perp oracle price is 0");
         uint256 _decimals = assetInfo.metaDecimals;
 
         //scale to 8 decimals and remove decimals from systemOracle

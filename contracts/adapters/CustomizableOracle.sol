@@ -18,10 +18,36 @@ contract CustomizableOracle {
     int256 public customPrice;
     uint256 public customPriceBlock;
 
-    uint256 public constant CUSTOM_PRICE_VALIDITY_BLOCKS = 1000;
+    uint256 public constant CUSTOM_PRICE_VALIDITY_BLOCKS = 500;
     uint256 public constant MAX_DEVIATION_BPS = 1000; // 10% max deviation from source
 
+    /// @notice Block number of last price change
+    uint256 public lastPriceChangeBlock;
+    /// @notice Minimum blocks between price changes
+    uint256 public constant MIN_PRICE_CHANGE_INTERVAL = 100;
+
     event CustomPriceSet(int256 price, uint256 blockNumber);
+
+    /// @notice Pending owner for two-step transfer
+    address public pendingOwner;
+
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /// @notice Initiate ownership transfer
+    function transferOwnership(address _newOwner) external onlyOwner {
+        require(_newOwner != address(0), "zero address");
+        pendingOwner = _newOwner;
+        emit OwnershipTransferStarted(owner, _newOwner);
+    }
+
+    /// @notice Accept pending ownership
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "not pending owner");
+        emit OwnershipTransferred(owner, pendingOwner);
+        owner = pendingOwner;
+        pendingOwner = address(0);
+    }
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -35,6 +61,7 @@ contract CustomizableOracle {
 
     function setPrice(int256 _price) external onlyOwner {
         require(_price > 0, "price must be > 0");
+        require(block.number - lastPriceChangeBlock >= MIN_PRICE_CHANGE_INTERVAL, "price changes too frequent");
 
         // Deviation check against source
         int256 sourcePrice = source.latestAnswer();
@@ -51,6 +78,7 @@ contract CustomizableOracle {
         customPrice = _price;
         customPriceBlock = block.number;
         emit CustomPriceSet(_price, block.number);
+        lastPriceChangeBlock = block.number;
     }
 
     function _isCustomPriceActive() internal view returns (bool) {
