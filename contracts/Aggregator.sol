@@ -67,6 +67,8 @@ contract Aggregator is Ownable {
     event RoundDataSubmitted(address[] _assets, uint256[] _prices, uint256 _timestamp);
     ///@notice event emmited when a keeper is added or removed
     event KeeperUpdated(address _keeper, bool _newState);
+    ///@notice event emitted when an asset is deleted
+    event AssetDeleted(address indexed _asset);
 
     /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                        MODIFIERS                           */
@@ -163,6 +165,11 @@ contract Aggregator is Ownable {
             ema: _price,
             lastTimestamp: block.timestamp
         });
+
+        if (_isPerpOracle) {
+            perpLastUpdateTimestamp[_asset] = block.timestamp;
+        }
+
         //if asset is not a perp, we can use any (unused) random high number for metaIndex
         metaIndexes[_metaIndex] = _asset;
 
@@ -180,6 +187,7 @@ contract Aggregator is Ownable {
     function updatePerpTimestamps(address[] calldata _assets) external onlyKeeper() {
         for (uint256 i = 0; i < _assets.length; i++) {
             require(assetDetails[_assets[i]].exists && assetDetails[_assets[i]].isPerpOracle, "not a perp asset");
+            require(block.timestamp > perpLastUpdateTimestamp[_assets[i]], "already updated this block");
             perpLastUpdateTimestamp[_assets[i]] = block.timestamp;
         }
     }
@@ -206,6 +214,7 @@ contract Aggregator is Ownable {
         require(assetDetails[_asset].exists, "deleteAsset: asset doesn't exist");
         metaIndexes[assetDetails[_asset].metaIndex] = address(0);
         assetDetails[_asset].exists = false;
+        emit AssetDeleted(_asset);
     }
 
 
@@ -254,6 +263,7 @@ contract Aggregator is Ownable {
         uint256[] memory oraclePrices = systemOracle.getOraclePxs();
         uint256 _metaIndex = assetInfo.metaIndex;
 
+        require(_metaIndex < oraclePrices.length, "metaIndex out of bounds");
         uint256 _price = oraclePrices[_metaIndex];
         require(_price > 0, "perp oracle price is 0");
         uint256 _decimals = assetInfo.metaDecimals;

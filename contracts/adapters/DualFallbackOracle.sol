@@ -142,7 +142,7 @@ contract DualFallbackOracle is IAdapter {
             ) = EMERGENCY_SOURCE.latestRoundData();
 
             require(_answerEmergency > 0, "emergency: invalid price");
-            require(block.timestamp - _updatedAtEmergency < MAX_HEARTBEAT_INTERVAL_PRIMARY, "emergency: stale");
+            require(block.timestamp - _updatedAtEmergency < MAX_HEARTBEAT_INTERVAL_FALLBACK, "emergency: stale");
 
             return (_roundIdEmergency, _answerEmergency, _startedAtEmergency, _updatedAtEmergency, _answeredInRoundEmergency);
         }
@@ -181,11 +181,10 @@ contract DualFallbackOracle is IAdapter {
                 uint80 _answeredInRoundFallback
             ) = FALLBACK_SOURCE.latestRoundData();
 
-            //if fallback is also unhealthy, but data is less stale than primary, return fallback data
-            if (_isFallbackHealthy(_answerFallback, _updatedAtFallback) || (_answerFallback > 0 && _updatedAtFallback > _updatedAt)){
+            if (_isFallbackHealthy(_answerFallback, _updatedAtFallback)) {
                 return (_roundIdFallback, _answerFallback, _startedAtFallback, _updatedAtFallback, _answeredInRoundFallback);
             }
-
+            // Both oracles unhealthy - revert
             revert("both oracles unhealthy");
         }
 

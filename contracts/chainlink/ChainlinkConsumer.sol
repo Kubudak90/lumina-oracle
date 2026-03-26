@@ -153,6 +153,12 @@ contract ChainlinkConsumer {
             abi.encode(feeToken)
         );
 
+        // Safety: reset any leftover fee token allowance
+        if (feeToken != address(0)) {
+            IFeeManager feeManagerRef = IFeeManager(address(s_verifierProxy.s_feeManager()));
+            IERC20(feeToken).approve(address(feeManagerRef.i_rewardManager()), 0);
+        }
+
         // Decode verified report data into the appropriate Report struct based on reportVersion
         if (reportVersion == 3) {
             // v3 report schema

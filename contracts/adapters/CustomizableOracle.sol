@@ -55,6 +55,7 @@ contract CustomizableOracle {
     }
 
     constructor(address _source) {
+        require(_source != address(0), "zero source");
         owner = msg.sender;
         source = IChainlinkLike(_source);
     }
@@ -65,15 +66,14 @@ contract CustomizableOracle {
 
         // Deviation check against source
         int256 sourcePrice = source.latestAnswer();
-        if (sourcePrice > 0) {
-            uint256 deviation;
-            if (_price > sourcePrice) {
-                deviation = uint256(_price - sourcePrice) * 10000 / uint256(sourcePrice);
-            } else {
-                deviation = uint256(sourcePrice - _price) * 10000 / uint256(sourcePrice);
-            }
-            require(deviation <= MAX_DEVIATION_BPS, "deviation too large");
+        require(sourcePrice > 0, "source price unavailable");
+        uint256 deviation;
+        if (_price > sourcePrice) {
+            deviation = uint256(_price - sourcePrice) * 10000 / uint256(sourcePrice);
+        } else {
+            deviation = uint256(sourcePrice - _price) * 10000 / uint256(sourcePrice);
         }
+        require(deviation <= MAX_DEVIATION_BPS, "deviation too large");
 
         customPrice = _price;
         customPriceBlock = block.number;

@@ -75,9 +75,10 @@ contract ERC4626Adapter is Ownable, IAdapter {
         uint256 assetPerBaseShare = asset.convertToAssets(baseShareAmount);
 
         require(assetPerBaseShare > 0, "ratio is 0");
-        // Sanity: ratio should not be more than 3x base (protection against donation attacks)
-        require(assetPerBaseShare <= baseShareAmount * 3, "ratio too high");
+        // Sanity: ratio should not be more than 2x base (protection against donation attacks)
+        require(assetPerBaseShare <= baseShareAmount * 2, "ratio too high");
         require(asset.totalSupply() >= 1e6, "vault too small");
+        require(asset.totalAssets() > 0, "no assets in vault");
 
         //calculate the price of 1 vault token
         answer = _answer * int256(assetPerBaseShare) / int256(baseShareAmount);

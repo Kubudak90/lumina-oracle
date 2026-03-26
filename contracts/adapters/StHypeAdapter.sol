@@ -83,9 +83,10 @@ contract StHypeAdapter is Ownable, IAdapter {
         require(_answer > 0, "price <= 0");
         require(block.timestamp - _updatedAt < MAX_STALENESS, "price stale");
 
-        (, int256 _ratioAnswer ,,,) = ratioProvider.latestRoundData();
+        (, int256 _ratioAnswer, , uint256 _ratioUpdatedAt,) = ratioProvider.latestRoundData();
         require(_ratioAnswer > 0, "ratio <= 0");
         require(uint256(_ratioAnswer) <= 2e18, "ratio too high");
+        require(block.timestamp - _ratioUpdatedAt < MAX_STALENESS, "ratio stale");
 
         answer = _answer * _ratioAnswer / int256(10**ratioDecimals);
 
