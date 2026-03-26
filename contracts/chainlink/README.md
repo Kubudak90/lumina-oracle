@@ -1,4 +1,4 @@
-### Chainlink Data Streams Integration Contracts for HyperLend
+### Chainlink Data Streams Integration Contracts for LightLend
 
 ---
 

@@ -1,11 +1,11 @@
-### HyperEVM oracle for HyperLend
+### LighterEVM oracle for LightLend
 
 ---
 
 ### Note: The majority of contracts in this repo were never used in production, and are therefore out of scope for bug bounties. Exceptions are certain `/adapters` and `/chainlink` contracts.
 
 
-HyperEVM oracle is used to read data from Hyperliquids System Oracle and serve it to HyperLend contracts in Chainlink-compatible* format:
+LighterEVM oracle is used to read data from Hyperliquids System Oracle and serve it to LightLend contracts in Chainlink-compatible* format:
 
 ---
 
@@ -34,6 +34,6 @@ Build & Tests
 
 ---
 
-Note that in order to test reading any data from the SystemOracle, you should use `hyperEvmTestnet` fork (but `fixture` won't work).
+Note that in order to test reading any data from the SystemOracle, you should use `lighterEvmTestnet` fork (but `fixture` won't work).
 
-`npx hardhat test test/baseTest.js --network hyperEvmTestnet`
+`npx hardhat test test/baseTest.js --network lighterEvmTestnet`

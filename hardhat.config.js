@@ -1,6 +1,8 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("dotenv").config();
 
+const PRIVATE_KEY = process.env.PRIVATE_KEY || "0x0000000000000000000000000000000000000000000000000000000000000001";
+
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
     solidity: {
@@ -14,18 +16,18 @@ module.exports = {
         ],
     },
     networks: {
-        hyperEvmTestnet: {
-            accounts: [process.env.PRIVATE_KEY],
+        lighterEvmTestnet: {
+            accounts: [PRIVATE_KEY],
             chainId: 998,
-            url: "https://rpc.hyperliquid-testnet.xyz/evm", 
+            url: "https://rpc.hyperliquid-testnet.xyz/evm",
             forking: {
                 url: "https://rpc.hyperliquid-testnet.xyz/evm",
             }
         },
-        hyperEvm: {
-            accounts: [process.env.PRIVATE_KEY],
+        lighterEvm: {
+            accounts: [PRIVATE_KEY],
             chainId: 999,
-            url: "https://rpc.hyperliquid.xyz/evm", 
+            url: "https://rpc.hyperliquid.xyz/evm",
             forking: {
                 url: "https://rpc.hyperliquid.xyz/evm",
             }
@@ -33,20 +35,20 @@ module.exports = {
     },
     etherscan: {
         apiKey: {
-            hyperEvmTestnet: "empty",
-            hyperEvm: process.env.ETHERSCAN_API_KEY
+            lighterEvmTestnet: "empty",
+            lighterEvm: process.env.ETHERSCAN_API_KEY
         },
         customChains: [
             {
-                network: "hyperEvmTestnet",
+                network: "lighterEvmTestnet",
                 chainId: 998,
                 urls: {
-                    apiURL: "https://explorer.hyperlend.finance/api",
-                    browserURL: "https://explorer.hyperlend.finance"
+                    apiURL: "https://explorer.lightlend.finance/api",
+                    browserURL: "https://explorer.lightlend.finance"
                 }
             },
             {
-                network: "hyperEvm",
+                network: "lighterEvm",
                 chainId: 999,
                 urls: {
                     apiURL: "https://api.etherscan.io/v2/api?chainId=999",

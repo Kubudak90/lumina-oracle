@@ -1,8 +1,8 @@
 const { ethers } = require("ethers");
 
 async function getLatestRoundData() {
-    // Hyperlend RPC
-    const rpcUrl = "https://rpc.hyperlend.finance";
+    // Lightlend RPC
+    const rpcUrl = "https://rpc.lightlend.finance";
     const provider = new ethers.JsonRpcProvider(rpcUrl);
 
     // Contract address

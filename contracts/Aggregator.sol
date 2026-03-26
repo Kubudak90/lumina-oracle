@@ -56,6 +56,8 @@ contract Aggregator is Ownable {
 
     /// @notice Last update timestamp for perp oracle prices
     mapping(address => uint256) public perpLastUpdateTimestamp;
+    /// @notice Last seen SystemOracle sysBlockNumber when perp timestamps were updated
+    uint256 public lastSeenSysBlock;
 
     /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                          EVENTS                            */
@@ -184,10 +186,13 @@ contract Aggregator is Ownable {
     }
 
     /// @notice Update perp oracle timestamps (called by keeper when system oracle updates)
+    /// @dev Requires that the SystemOracle has actually been updated (sysBlockNumber increased)
     function updatePerpTimestamps(address[] calldata _assets) external onlyKeeper() {
+        uint256 currentSysBlock = systemOracle.sysBlockNumber();
+        require(currentSysBlock > lastSeenSysBlock, "system oracle not updated");
+        lastSeenSysBlock = currentSysBlock;
         for (uint256 i = 0; i < _assets.length; i++) {
             require(assetDetails[_assets[i]].exists && assetDetails[_assets[i]].isPerpOracle, "not a perp asset");
-            require(block.timestamp > perpLastUpdateTimestamp[_assets[i]], "already updated this block");
             perpLastUpdateTimestamp[_assets[i]] = block.timestamp;
         }
     }

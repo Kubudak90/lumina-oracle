@@ -6,7 +6,7 @@ describe("Aggregator-BaseTest", function () {
         const [owner, keeper, user] = await ethers.getSigners();
 
         //when setting 0x111 contract on hardhat network using hardhat_setCode, read calls will fail with BAD_DATA
-        //so testing perp prices is possible by using fork hyperEvmTestnet network
+        //so testing perp prices is possible by using fork lighterEvmTestnet network
         const mockSystemOracle = await ethers.getContractAt("MockSystemOracle", '0x1111111111111111111111111111111111111111');
 
         const Aggregator = await ethers.getContractFactory("Aggregator");
@@ -19,7 +19,7 @@ describe("Aggregator-BaseTest", function () {
         const { aggregator, owner, mockSystemOracle } = await deploy(); //can't use fixture on a fork network
 
         if (network.config.chainId != 998){
-            console.log(`skipping: use hyperEvmTestnet fork network`)
+            console.log(`skipping: use lighterEvmTestnet fork network`)
             return;
         }
 
