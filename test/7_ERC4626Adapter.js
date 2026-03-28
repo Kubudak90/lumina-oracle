@@ -14,7 +14,7 @@ describe("ERC4626Adapter", function () {
 
         const ERC4626Adapter = await ethers.getContractFactory("ERC4626Adapter");
         const erc4626Adapter = await ERC4626Adapter.deploy(
-            mockPriceProvider.target, "MOCK", mockERC4626.target
+            mockPriceProvider.target, "MOCK", mockERC4626.target, 86400
         );
 
         return { mockPriceProvider, erc4626Adapter, mockERC4626, owner, keeper, user };

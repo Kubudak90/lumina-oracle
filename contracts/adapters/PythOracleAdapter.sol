@@ -13,6 +13,8 @@ contract PythOracleAdapter {
     bytes32 public immutable priceFeedId;
     /// @notice maximum allowed staleness in seconds
     uint256 public immutable MAX_STALENESS;
+    /// @notice cached decimals from Pyth price feed
+    uint8 private immutable _cachedDecimals;
 
     /// @param _pyth The address of the Pyth contract
     /// @param _priceFeedId ID of the Pyth price feed
@@ -21,6 +23,7 @@ contract PythOracleAdapter {
         pyth = IPyth(_pyth);
         priceFeedId = _priceFeedId;
         MAX_STALENESS = _maxStaleness;
+        _cachedDecimals = uint8(uint32(-1 * pyth.getPriceNoOlderThan(priceFeedId, MAX_STALENESS).expo));
     }
 
     function _getPrice() internal view returns (PythStructs.Price memory price) {
@@ -35,8 +38,7 @@ contract PythOracleAdapter {
     }
 
     function decimals() external view returns (uint8) {
-        PythStructs.Price memory price = _getPrice();
-        return uint8(uint32(-1 * price.expo));
+        return _cachedDecimals;
     }
 
     function latestRoundData() external view returns (

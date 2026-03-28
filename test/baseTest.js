@@ -10,7 +10,7 @@ describe("Aggregator-BaseTest", function () {
         const mockSystemOracle = await ethers.getContractAt("MockSystemOracle", '0x1111111111111111111111111111111111111111');
 
         const Aggregator = await ethers.getContractFactory("Aggregator");
-        const aggregator = await Aggregator.deploy();
+        const aggregator = await Aggregator.deploy("0x1111111111111111111111111111111111111111");
 
         return { aggregator, owner, keeper, user, mockSystemOracle };
     }

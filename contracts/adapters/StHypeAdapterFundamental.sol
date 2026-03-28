@@ -7,7 +7,7 @@ import { IAdapter } from "../interfaces/IAdapter.sol";
 import { IOracle } from "../interfaces/IOracle.sol";
 import { IERC4626 } from "../interfaces/IERC4626.sol";
 
-interface IstHYPE {
+interface IstLIT {
     function decimals() external view returns (uint8);
     function totalSupply() external view returns (uint256);
     function totalShares() external view returns (uint256);
@@ -17,10 +17,10 @@ interface IstHYPE {
     function sthype() external view returns (address);
 }
 
-///@title wStHypeAdapter
+///@title wStLitAdapter
 ///@author LightLend
-///@notice An adapter returning price of wrapped staked HYPE (wstHYPE), based on underlying asset
-contract StHypeAdapterFundamental is Ownable, IAdapter {
+///@notice An adapter returning price of wrapped staked LIT (wstLIT), based on underlying asset
+contract StLitAdapterFundamental is Ownable, IAdapter {
     /// @notice contract providing price of the underlying asset
     IOracle public priceProvider;
 
@@ -28,10 +28,10 @@ contract StHypeAdapterFundamental is Ownable, IAdapter {
     string public description;
     /// @notice the number of decimals the aggregator responses represent
     uint8 public decimals;
-    /// @notice address of the underlying wstHYPE token
-    IstHYPE public asset;
-    /// @notice address of the underlying stHYPE token
-    IstHYPE public stHYPE;
+    /// @notice address of the underlying wstLIT token
+    IstLIT public asset;
+    /// @notice address of the underlying stLIT token
+    IstLIT public stLIT;
     ///@notice decimals of the ratio oracle
     uint8 public ratioDecimals;
     ///@notice maximum allowed staleness for price feed
@@ -40,15 +40,15 @@ contract StHypeAdapterFundamental is Ownable, IAdapter {
     /// @param _priceProvider contract providing price of the underlying asset
     /// @param _description the description of the price source
     /// @param _asset address of the underlying asset
-    /// @param _ratioDecimals number of decimal places for wstHYPE/stHYPE ratio
+    /// @param _ratioDecimals number of decimal places for wstLIT/stLIT ratio
     /// @param _maxStaleness maximum allowed staleness in seconds
     constructor(address _priceProvider, string memory _description, address _asset, uint8 _ratioDecimals, uint256 _maxStaleness) Ownable(msg.sender) {
         priceProvider = IOracle(_priceProvider);
         description = _description;
         decimals = priceProvider.decimals();
-        asset = IstHYPE(_asset);
+        asset = IstLIT(_asset);
         ratioDecimals = _ratioDecimals;
-        stHYPE = IstHYPE(asset.sthype());
+        stLIT = IstLIT(asset.sthype());
         MAX_STALENESS = _maxStaleness;
     }
 
@@ -86,7 +86,7 @@ contract StHypeAdapterFundamental is Ownable, IAdapter {
         require(_answer > 0, "price <= 0");
         require(block.timestamp - _updatedAt < MAX_STALENESS, "price stale");
 
-        //get the wstHYPE/stHYPE ratio with 18 decimals
+        //get the wstLIT/stLIT ratio with 18 decimals
         int256 _ratioAnswer = getRatio();
 
         answer = _answer * _ratioAnswer / int256(10**ratioDecimals);
@@ -99,7 +99,7 @@ contract StHypeAdapterFundamental is Ownable, IAdapter {
     }
 
     function getRatio() public view returns (int256) {
-        uint256 ratio = stHYPE.balancePerShare();
+        uint256 ratio = stLIT.balancePerShare();
         require(ratio > 0, "ratio is 0");
         require(ratio <= 2e18, "ratio too high"); // staking ratio shouldn't exceed 2x
         return int256(ratio);

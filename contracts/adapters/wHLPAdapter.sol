@@ -13,22 +13,22 @@ interface IAccountant {
     function getRateInQuoteSafe(address quote) external view returns (uint256);
 }
 
-contract wHlpAdapter {
+contract VaultAdapter {
     /// @notice contract providing price of the quote asset
     IOracle public priceProvider;
-    /// @notice wHLP accountant contract
+    /// @notice vault accountant contract
     IAccountant public accountant;
 
-    /// @notice address of the quote asset (USDhl)
+    /// @notice address of the quote asset (USDC)
     address public quoteAsset;
-    /// @notice decimals of the wHLP/USDhl ratio
+    /// @notice decimals of the vault/USDC ratio
     uint256 public ratioDecimals;
     ///@notice maximum allowed staleness for price feed
     uint256 public immutable MAX_STALENESS;
 
     /// @param _priceProvider contract providing price of the quote asset
-    /// @param _accountant wHLP accountant contract
-    /// @param _quoteAsset address of the quote asset (USDhl)
+    /// @param _accountant vault accountant contract
+    /// @param _quoteAsset address of the quote asset (USDC)
     /// @param _maxStaleness maximum allowed staleness in seconds
     constructor(address _priceProvider, address _accountant, address _quoteAsset, uint256 _maxStaleness) {
         priceProvider = IOracle(_priceProvider);
@@ -59,7 +59,7 @@ contract wHlpAdapter {
         return getData();
     }
 
-    /// @notice calculate the final price from USDHL/USD price and wHLP/USDHL ratio
+    /// @notice calculate the final price from USDC/USD price and vault/USDC ratio
     function getData() internal view returns (
         uint80 roundId,
         int256 answer,
@@ -67,7 +67,7 @@ contract wHlpAdapter {
         uint256 updatedAt,
         uint80 answeredInRound
     ) {
-        //fetch quote asset price (USDhl)
+        //fetch quote asset price (USDC)
         (
             uint80 _roundId,
             int256 _answer,
@@ -78,9 +78,10 @@ contract wHlpAdapter {
         require(_answer > 0, "price <= 0");
         require(block.timestamp - _updatedAt < MAX_STALENESS, "price stale");
 
-        //get the wHLP/USDhl ratio
+        //get the vault/USDC ratio
         uint256 _ratioAnswer = accountant.getRateInQuoteSafe(quoteAsset);
         require(_ratioAnswer > 0, "ratio <= 0");
+        require(_ratioAnswer <= 2 * 10**ratioDecimals, "ratio too high");
 
         answer = _answer * int256(_ratioAnswer) / int256(10**ratioDecimals);
 

@@ -22,9 +22,9 @@ import { IACLManager } from "../interfaces/IACLManager.sol";
         - if it's not, return primary prices (even if they are also unhealthy)
 
     Example:
-        - primary: kHYPE-market-redstone
-        - secondary: kHYPE-market-chainlink
-        - emergency: kHYPE-fundamental-redstone (if we think kHYPE might depeg on secondary markets but there are no underlying issues (like 10/10 crash), we can switch using emergency multisig without having to go through 3h timelock))
+        - primary: stLIT-market-redstone
+        - secondary: stLIT-market-chainlink
+        - emergency: stLIT-fundamental-redstone (if we think stLIT might depeg on secondary markets but there are no underlying issues (like 10/10 crash), we can switch using emergency multisig without having to go through 3h timelock))
 */
 contract DualFallbackOracle is IAdapter {
     /// @notice LightLend ACL Manager contract

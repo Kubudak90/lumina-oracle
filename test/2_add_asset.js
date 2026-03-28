@@ -7,7 +7,7 @@ describe("Aggregator-AddAsset", function () {
         const [owner, keeper, user] = await ethers.getSigners();
 
         const Aggregator = await ethers.getContractFactory("Aggregator");
-        const aggregator = await Aggregator.deploy();
+        const aggregator = await Aggregator.deploy(owner.address);
 
         return { aggregator, owner, keeper, user };
     }
@@ -92,15 +92,15 @@ describe("Aggregator-AddAsset", function () {
             .withArgs(asset, isPerpOracle, metaIndex, metaDecimals, price, isUpdate)
         expect(await aggregator.metaIndexes(1)).to.equal(asset)
 
-        asset = "0x2220000000000000000000000000000000000024"
+        // Update the same asset with new parameters (price within 20% deviation)
         isPerpOracle = false;
         metaIndex = 2;
         metaDecimals = 4;
-        price = "200000000";
+        price = "110000000";
         isUpdate = true;
         await expect(aggregator.setAsset(asset, isPerpOracle, metaIndex, metaDecimals, price, isUpdate))
             .to.emit(aggregator, "AssetChanged")
-            .withArgs(asset, isPerpOracle, metaIndex, metaDecimals, price, isUpdate)  
+            .withArgs(asset, isPerpOracle, metaIndex, metaDecimals, price, isUpdate)
 
         expect((await aggregator.assetDetails(asset)).exists).to.equal(true)
         expect((await aggregator.assetDetails(asset)).isPerpOracle).to.equal(false)

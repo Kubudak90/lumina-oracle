@@ -9,7 +9,7 @@ import { ISystemOracle } from "./interfaces/ISystemOracle.sol";
 ///@author fbsloXBT
 ///@notice A price oracle aggregator for LighterEVM.
 ///@dev There are 2 types of assets:
-/// - perp-oracle assets where HL SystemOracle has the oracle price (submitted by L1 validators).
+/// - perp-oracle assets where the System Oracle has the oracle price (submitted by L1 validators).
 /// - assets, where price is provided by an off-chain keepers (and then exponential moving average is used)
 contract Aggregator is Ownable {
     ///@notice Lightlend L1 system oracle
@@ -47,7 +47,7 @@ contract Aggregator is Ownable {
         uint256 lastTimestamp;
     }
 
-    ///@notice mapping of Hyperliquid system oracle indexes to asset address
+    ///@notice mapping of LighterEVM system oracle indexes to asset address
     mapping(uint256 => address) public metaIndexes;
     ///@notice mapping of asset addresses to details
     mapping(address => AssetDetails) public assetDetails;
@@ -128,7 +128,7 @@ contract Aggregator is Ownable {
 
     ///@notice function used to add or update supported assets
     ///@param _asset address of the asset
-    ///@param _isPerpOracle indicates if HL perp oracle price is available
+    ///@param _isPerpOracle indicates if perp oracle price is available
     ///@param _metaIndex index of the asset price in SystemOracle data (only for perp-oracle assets)
     ///@param _metaDecimals number of decimals of price in SystemOracle data (only for perp-oracle assets: price = x / Math.pow(10, 6 - decimals))
     ///@param _isUpdate indicates if asset is being added or updated
@@ -208,6 +208,8 @@ contract Aggregator is Ownable {
 
         for (uint256 i = 0; i < _assets.length; i++){
             require(_prices[i] > 0, "price must be > 0");
+            require(assetDetails[_assets[i]].exists, "asset not found");
+            require(!assetDetails[_assets[i]].isPerpOracle, "not a keeper asset");
             require(_submitTimestamp > assetDetails[_assets[i]].lastTimestamp, "timestamp not monotonic");
             _calculateEma(_assets[i], _prices[i]);
         }
@@ -218,7 +220,8 @@ contract Aggregator is Ownable {
     function deleteAsset(address _asset) external onlyOwner() {
         require(assetDetails[_asset].exists, "deleteAsset: asset doesn't exist");
         metaIndexes[assetDetails[_asset].metaIndex] = address(0);
-        assetDetails[_asset].exists = false;
+        delete assetDetails[_asset];
+        delete perpLastUpdateTimestamp[_asset];
         emit AssetDeleted(_asset);
     }
 
@@ -261,9 +264,8 @@ contract Aggregator is Ownable {
 
         // Enforce staleness check for perp oracle
         uint256 lastUpdate = perpLastUpdateTimestamp[_asset];
-        if (lastUpdate > 0) {
-            require(block.timestamp - lastUpdate < MAX_PERP_STALE_SECONDS, "perp oracle stale");
-        }
+        require(lastUpdate > 0, "perp oracle never updated");
+        require(block.timestamp - lastUpdate < MAX_PERP_STALE_SECONDS, "perp oracle stale");
 
         uint256[] memory oraclePrices = systemOracle.getOraclePxs();
         uint256 _metaIndex = assetInfo.metaIndex;
@@ -274,7 +276,7 @@ contract Aggregator is Ownable {
         uint256 _decimals = assetInfo.metaDecimals;
 
         //scale to 8 decimals and remove decimals from systemOracle
-        //https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/evm/system-contract
+        //See system oracle documentation for price encoding details
         return _price * (10**8) / (10**(6 - _decimals));
     }
 }

@@ -7,17 +7,17 @@ import { IAdapter } from "../interfaces/IAdapter.sol";
 import { IOracle } from "../interfaces/IOracle.sol";
 import { IERC4626 } from "../interfaces/IERC4626.sol";
 
-interface IstHYPE {
+interface IstLIT {
     function decimals() external view returns (uint8);
     function totalSupply() external view returns (uint256);
     function totalShares() external view returns (uint256);
     function balanceToShareDecimals() external view returns (uint256);
 }
 
-///@title wStHypeAdapter
+///@title wStLitAdapter
 ///@author LightLend
-///@notice An adapter returning price of wrapped staked HYPE (wstHYPE), based on underlying asset
-contract StHypeAdapter is Ownable, IAdapter {
+///@notice An adapter returning price of wrapped staked LIT (wstLIT), based on underlying asset
+contract StLitAdapter is Ownable, IAdapter {
     /// @notice contract providing price of the underlying asset
     IOracle public priceProvider;
     /// @notice contract providing the ratio between wrapped and underlying asset
@@ -27,8 +27,8 @@ contract StHypeAdapter is Ownable, IAdapter {
     string public description;
     /// @notice the number of decimals the aggregator responses represent
     uint8 public decimals;
-    /// @notice address of the underlying stHYPE token
-    IstHYPE public asset;
+    /// @notice address of the underlying stLIT token
+    IstLIT public asset;
     ///@notice decimals of the ratio oracle
     uint8 public ratioDecimals;
     /// @notice Maximum allowed staleness for price feed
@@ -43,7 +43,7 @@ contract StHypeAdapter is Ownable, IAdapter {
         priceProvider = IOracle(_priceProvider);
         description = _description;
         decimals = priceProvider.decimals();
-        asset = IstHYPE(_asset);
+        asset = IstLIT(_asset);
         ratioProvider = IOracle(_ratioProvider);
         ratioDecimals = ratioProvider.decimals();
         MAX_STALENESS = _maxStaleness;

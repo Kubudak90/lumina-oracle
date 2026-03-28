@@ -7,7 +7,7 @@ describe("Aggregator-Setup", function () {
         const [owner, keeper, user] = await ethers.getSigners();
 
         const Aggregator = await ethers.getContractFactory("Aggregator");
-        const aggregator = await Aggregator.deploy();
+        const aggregator = await Aggregator.deploy(owner.address);
 
         return { aggregator, owner, keeper, user };
     }
@@ -18,7 +18,7 @@ describe("Aggregator-Setup", function () {
     });
 
     it("should use correct system oracle", async function () {
-        const { aggregator } = await loadFixture(deploy);
-        expect(await aggregator.systemOracle()).to.equal("0x1111111111111111111111111111111111111111")
+        const { aggregator, owner } = await loadFixture(deploy);
+        expect(await aggregator.systemOracle()).to.equal(owner.address)
     });
 });

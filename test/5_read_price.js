@@ -13,10 +13,10 @@ describe("Aggregator-ReadPrice", function () {
         const mockSystemOracle = await ethers.getContractAt("MockSystemOracle", '0x1111111111111111111111111111111111111111');
 
         const Aggregator = await ethers.getContractFactory("Aggregator");
-        const aggregator = await Aggregator.deploy();
+        const aggregator = await Aggregator.deploy("0x1111111111111111111111111111111111111111");
 
         await aggregator.toggleKeeper(keeper.address)
-        await aggregator.setAsset("0x0000000000000000000000000000000000000024", false, 1, 0, "0", false)
+        await aggregator.setAsset("0x0000000000000000000000000000000000000024", false, 1, 0, "100000000", false)
 
         return { aggregator, owner, keeper, user, mockSystemOracle };
     }
@@ -33,6 +33,7 @@ describe("Aggregator-ReadPrice", function () {
         const { aggregator, keeper, user } = await loadFixture(deploy);
         const asset = "0x0000000000000000000000000000000000000024"
         const price = "100000000"
+        await time.increase(1)
         const beforeSubmitTimestamp = await time.latest();
         const detailsBeforeUpdate = await aggregator.assetDetails(asset)
         await aggregator.connect(keeper).submitRoundData([asset], [price], beforeSubmitTimestamp)
@@ -82,16 +83,17 @@ describe("Aggregator-ReadPrice", function () {
     it("should return block.timestamp in getUpdateTimestamp for perp asset", async function () {
         const { aggregator, keeper, user } = await loadFixture(deploy);
 
-        await aggregator.setAsset("0x0000000000000000000000000000000000000077", true, 2, 0, "0", false)
+        await aggregator.setAsset("0x0000000000000000000000000000000000000077", true, 2, 0, "100000000", false)
 
         const lastTimestamp = await time.latest();
         expect(await aggregator.getUpdateTimestamp("0x0000000000000000000000000000000000000077")).to.equal(lastTimestamp)
     });
 
-    it("should return lastTimestamp in getUpdateTimestamp for perp asset", async function () {
+    it("should return lastTimestamp in getUpdateTimestamp for non-perp asset", async function () {
         const { aggregator, keeper, user } = await loadFixture(deploy);
         const asset = "0x0000000000000000000000000000000000000024"
         const price = "100000000"
+        await time.increase(1)
         const beforeSubmitTimestamp = await time.latest();
         await aggregator.connect(keeper).submitRoundData([asset], [price], beforeSubmitTimestamp)
 

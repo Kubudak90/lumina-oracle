@@ -2,10 +2,10 @@ const hre = require("hardhat");
 
 const { verify } = require("../utils/verify")
 
-main('0xa8a94Da411425634e3Ed6C331a32ab4fd774aa43', 'kmHYPE/USD-redstone-fundamental', '0x360C140E5344A1A0593D44B4ea6Fc7C3DAf0C473', 18, "0x4ef8bBaceE867eFd6Faa684B30ecD12DF74C4A48")
+main('0xa8a94Da411425634e3Ed6C331a32ab4fd774aa43', 'kmLIT/USD-redstone-fundamental', '0x360C140E5344A1A0593D44B4ea6Fc7C3DAf0C473', 18, "0x4ef8bBaceE867eFd6Faa684B30ecD12DF74C4A48")
 
 async function main(priceProvider, description, asset, decimals, manager) {
-    // const proxy = await hre.ethers.deployContract("StHypeAdapter", [
+    // const proxy = await hre.ethers.deployContract("StLitAdapter", [
     //     priceProvider,
     //     description,
     //     asset,
@@ -25,7 +25,7 @@ async function main(priceProvider, description, asset, decimals, manager) {
 
     // return proxy
 
-    const proxy = await hre.ethers.deployContract("kmHypeAdapterFundamental", [
+    const proxy = await hre.ethers.deployContract("kmLitAdapterFundamental", [
         priceProvider,
         description,
         asset,

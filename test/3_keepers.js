@@ -7,7 +7,7 @@ describe("Aggregator-Keepers", function () {
         const [owner, keeper, user] = await ethers.getSigners();
 
         const Aggregator = await ethers.getContractFactory("Aggregator");
-        const aggregator = await Aggregator.deploy();
+        const aggregator = await Aggregator.deploy(owner.address);
 
         return { aggregator, owner, keeper, user };
     }

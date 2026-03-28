@@ -73,6 +73,7 @@ contract RatioAdapter is Ownable, IAdapter {
 
         (, int256 _ratioAnswer, , uint256 _ratioUpdatedAt, ) = ratioProvider.latestRoundData();
         require(_ratioAnswer > 0, "ratio <= 0");
+        require(uint256(_ratioAnswer) <= 2 * 10**ratioDecimals, "ratio too high");
         require(block.timestamp - _ratioUpdatedAt < MAX_STALENESS, "ratio stale");
 
         answer = _answer * _ratioAnswer / int256(10**ratioDecimals);

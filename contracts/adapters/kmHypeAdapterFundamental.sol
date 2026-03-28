@@ -7,7 +7,7 @@ import { IAdapter } from "../interfaces/IAdapter.sol";
 import { IOracle } from "../interfaces/IOracle.sol";
 import { IERC4626 } from "../interfaces/IERC4626.sol";
 
-interface IkmHYPE {
+interface IkmLIT {
     function decimals() external view returns (uint8);
     function totalSupply() external view returns (uint256);
     function totalShares() external view returns (uint256);
@@ -18,13 +18,13 @@ interface IkmHYPE {
 }
 
 interface IManager {
-    function EXLSTToHYPE(uint256 shares) external view returns (uint256);
+    function EXLSTToLIT(uint256 shares) external view returns (uint256);
 }
 
-///@title kmHypeAdapterFundamental
+///@title kmLitAdapterFundamental
 ///@author LightLend
-///@notice An adapter returning price of kmHYPE (by Kinetiq), based on underlying asset
-contract kmHypeAdapterFundamental is Ownable, IAdapter {
+///@notice An adapter returning price of kmLIT, based on underlying asset
+contract kmLitAdapterFundamental is Ownable, IAdapter {
     /// @notice contract providing price of the underlying asset
     IOracle public priceProvider;
 
@@ -32,8 +32,8 @@ contract kmHypeAdapterFundamental is Ownable, IAdapter {
     string public description;
     /// @notice the number of decimals the aggregator responses represent
     uint8 public decimals;
-    /// @notice address of the underlying kmHYPE token
-    IkmHYPE public asset;
+    /// @notice address of the underlying kmLIT token
+    IkmLIT public asset;
     /// @notice address of the EX Manager
     IManager public manager;
     ///@notice decimals of the ratio oracle
@@ -44,14 +44,14 @@ contract kmHypeAdapterFundamental is Ownable, IAdapter {
     /// @param _priceProvider contract providing price of the underlying asset
     /// @param _description the description of the price source
     /// @param _asset address of the underlying asset
-    /// @param _ratioDecimals number of decimal places for kmHYPE/HYPE ratio
+    /// @param _ratioDecimals number of decimal places for kmLIT/LIT ratio
     /// @param _manager address of the EX Manager
     /// @param _maxStaleness maximum allowed staleness in seconds
     constructor(address _priceProvider, string memory _description, address _asset, uint8 _ratioDecimals, address _manager, uint256 _maxStaleness) Ownable(msg.sender) {
         priceProvider = IOracle(_priceProvider);
         description = _description;
         decimals = priceProvider.decimals();
-        asset = IkmHYPE(_asset);
+        asset = IkmLIT(_asset);
         ratioDecimals = _ratioDecimals;
         manager = IManager(_manager);
         MAX_STALENESS = _maxStaleness;
@@ -91,7 +91,7 @@ contract kmHypeAdapterFundamental is Ownable, IAdapter {
         require(_answer > 0, "price <= 0");
         require(block.timestamp - _updatedAt < MAX_STALENESS, "price stale");
 
-        //get the kmHYPE/HYPE ratio with 18 decimals
+        //get the kmLIT/LIT ratio with 18 decimals
         int256 _ratioAnswer = getRatio();
 
         answer = _answer * _ratioAnswer / int256(10**ratioDecimals);
@@ -104,7 +104,7 @@ contract kmHypeAdapterFundamental is Ownable, IAdapter {
     }
 
     function getRatio() public view returns (int256) {
-        uint256 ratio = manager.EXLSTToHYPE(1_000_000_000_000_000_000);
+        uint256 ratio = manager.EXLSTToLIT(1_000_000_000_000_000_000);
         require(ratio > 0, "ratio is 0");
         require(ratio <= 2e18, "ratio too high");
         return int256(ratio);
