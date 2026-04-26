@@ -2,6 +2,7 @@ require("@nomicfoundation/hardhat-toolbox");
 require("dotenv").config();
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY || "0x0000000000000000000000000000000000000000000000000000000000000001";
+const mnemonic = process.env.MNEMONIC;
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -31,6 +32,11 @@ module.exports = {
             forking: {
                 url: "https://rpc.hyperliquid.xyz/evm",
             }
+        },
+        baseSepolia: {
+            accounts: [process.env.DEPLOYER_PRIVATE_KEY || PRIVATE_KEY],
+            chainId: 84532,
+            url: "https://sepolia.base.org",
         }
     },
     etherscan: {
