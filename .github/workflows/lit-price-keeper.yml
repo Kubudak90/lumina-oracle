@@ -1,0 +1,39 @@
+name: LIT price keeper
+
+# Pulls LIT/USD from CoinGecko and pushes the answer into:
+#   - UpdatableAggregator (consumed by AaveOracle for /markets and /leverage)
+#   - MockSwapper          (used by Looping for testnet swap rates)
+#
+# Runs every 30 minutes; can also be triggered manually from the Actions tab.
+#
+# Required secrets (Settings -> Secrets -> Actions):
+#   DEPLOYER_PRIVATE_KEY   admin/keeper key - must be UpdatableAggregator
+#                          owner-or-keeper AND MockSwapper admin.
+# Optional secrets:
+#   COINGECKO_API_KEY      pro key (sent as x-cg-pro-api-key)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  update-lit-price:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Push LIT price on-chain
+        env:
+          DEPLOYER_PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: npx hardhat run scripts/keeper/updateLitPrice.js --network baseSepolia
