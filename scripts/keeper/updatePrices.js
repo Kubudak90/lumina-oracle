@@ -35,8 +35,8 @@ const FEEDS = [
         feed: "0x9966BCA6eD030256c2585D8823ecF035e296f49A",
         token: "0x4200000000000000000000000000000000000006",
         decimals: 18,
-        // WETH not in MockSwapper's swap mix yet — skip mirror.
-        syncToSwapper: false,
+        // WETH is in MockSwapper's swap mix (0.03 WETH seeded) — keep mirror.
+        syncToSwapper: true,
     },
 ];
 
