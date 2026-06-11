@@ -23,9 +23,6 @@ const { verify } = require("./utils/verify");
 // TODO: Set the correct Pyth contract address on LighterEVM
 const PYTH_CONTRACT = "0x2880aB155794e7179c9eE2e38200202908C17B43";
 
-// TODO: Set the correct Chainlink verifier proxy on LighterEVM (for ChainlinkConsumer)
-const CHAINLINK_CONSUMER = "0x0000000000000000000000000000000000000000";
-
 // TODO: Set the LightLend ACL Manager address (required for DualFallbackOracle admin checks)
 const ACL_MANAGER = "0x0000000000000000000000000000000000000000";
 
@@ -71,6 +68,34 @@ const assets = {
 // DualFallbackOracle heartbeat configuration (in seconds)
 const MAX_INTERVAL_PRIMARY = 3600;    // 1 hour
 const MAX_INTERVAL_FALLBACK = 25200;  // 7 hours
+
+// ---------------------------------------------------------------------------
+// Pre-flight validation
+// ---------------------------------------------------------------------------
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const ZERO_BYTES32 = "0x" + "0".repeat(64);
+
+// Refuses to run while required config still holds placeholder values, so the
+// stack can't be silently deployed with 0x0 wired into immutable constructors.
+// FINAL_OWNER and KEEPER_ADDRESS stay optional: main() skips those steps with
+// an explicit warning when unset, and both can be configured post-deploy.
+function assertConfigured() {
+    const placeholders = [];
+    if (PYTH_CONTRACT === ZERO_ADDRESS) placeholders.push("PYTH_CONTRACT");
+    if (ACL_MANAGER === ZERO_ADDRESS) placeholders.push("ACL_MANAGER");
+    for (const [symbol, config] of Object.entries(assets)) {
+        if (config.tokenAddress === ZERO_ADDRESS) placeholders.push(`assets.${symbol}.tokenAddress`);
+        if (config.isPerpOracle && (!config.pythPriceFeedId || config.pythPriceFeedId === ZERO_BYTES32)) {
+            placeholders.push(`assets.${symbol}.pythPriceFeedId`);
+        }
+    }
+    if (placeholders.length > 0) {
+        throw new Error(
+            `Refusing to deploy: placeholder values still set for ${placeholders.join(", ")}. ` +
+            "Fill in the TODO constants at the top of scripts/deploy-lighter.js first."
+        );
+    }
+}
 
 // Gas overrides for LighterEVM
 const txOverrides = { gasPrice: 5000000000, gasLimit: 2000000 };
@@ -171,12 +196,6 @@ async function deployAssetOracleAdapters(aggregator) {
 async function deployDualFallbackOracle(primaryAddress, fallbackAddress, emergencyAddress, description) {
     console.log("\n[6/6] Deploying DualFallbackOracle...");
 
-    if (ACL_MANAGER === "0x0000000000000000000000000000000000000000") {
-        console.log("  WARNING: ACL_MANAGER is a placeholder address.");
-        console.log("  DualFallbackOracle will be deployed but admin functions won't work");
-        console.log("  until a valid ACL_MANAGER is set. Update the ACL_MANAGER constant and redeploy.");
-    }
-
     const constructorArgs = [
         primaryAddress,
         fallbackAddress,
@@ -202,6 +221,8 @@ async function deployDualFallbackOracle(primaryAddress, fallbackAddress, emergen
 // =============================================================================
 
 async function main() {
+    assertConfigured();
+
     const [deployer] = await hre.ethers.getSigners();
     console.log("=".repeat(70));
     console.log("LighterEVM Oracle Infrastructure Deployment");
@@ -267,9 +288,7 @@ async function main() {
     console.log(`DualFallbackOracle (WETH): ${dualOracleWETH.target}`);
     console.log("=".repeat(70));
     console.log("\nTODOs before production:");
-    console.log("  - Replace placeholder token addresses (USDC, WETH)");
     console.log("  - Verify Pyth contract address and ETH/USD price feed ID");
-    console.log("  - Set ACL_MANAGER to the real LightLend ACL Manager");
     console.log("  - Set FINAL_OWNER to the governance/multisig address");
     console.log("  - Set KEEPER_ADDRESS to the off-chain keeper bot");
     console.log("  - Confirm metaIndex and metaDecimals for WETH in SystemOracle");
