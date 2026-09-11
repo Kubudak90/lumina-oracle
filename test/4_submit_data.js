@@ -63,7 +63,7 @@ describe("Aggregator-SubmitData", function () {
         const { aggregator, keeper, user } = await loadFixture(deploy);
         const asset = "0x0000000000000000000000000000000000000024"
         const timestamp = (await time.latest()) + 1000
-        await expect(aggregator.connect(keeper).submitRoundData([asset], ["100000000"], timestamp)).to.be.revertedWithPanic("0x11") //overflow
+        await expect(aggregator.connect(keeper).submitRoundData([asset], ["100000000"], timestamp)).to.be.revertedWith("submitRoundData: future timestamp")
     });
 
     it("should calculate correct EMA on first round", async function () {
@@ -77,10 +77,9 @@ describe("Aggregator-SubmitData", function () {
         const newPrice = 100000000
         await aggregator.connect(keeper).submitRoundData([asset], [newPrice], beforeSubmitTimestamp)
 
-        //calculate EMA
-        let currentTimestamp = await time.latest();
+        //calculate EMA using the keeper submit timestamp, not block.timestamp
         let tau = Number(await aggregator.EMA_WINDOW_SECONDS())
-        let w = Math.exp(-(Number(currentTimestamp) - Number(detailsBeforeUpdate.lastTimestamp)) / tau);
+        let w = Math.exp(-(Number(beforeSubmitTimestamp) - Number(detailsBeforeUpdate.lastTimestamp)) / tau);
         let expectedEma = Math.floor(Number(detailsBeforeUpdate.ema) * w + newPrice * (1 - w))
 
         expect(await aggregator.getPrice(asset)).to.equal(expectedEma)
@@ -100,10 +99,9 @@ describe("Aggregator-SubmitData", function () {
             let beforeSubmitTimestamp = await time.latest();
             await aggregator.connect(keeper).submitRoundData([asset], [prices[i]], beforeSubmitTimestamp)
 
-            //calculate EMA
-            let currentTimestamp = await time.latest();
+            //calculate EMA using the keeper submit timestamp
             let tau = Number(await aggregator.EMA_WINDOW_SECONDS())
-            let w = Math.exp(-(Number(currentTimestamp) - Number(detailsBeforeUpdate.lastTimestamp)) / tau);
+            let w = Math.exp(-(Number(beforeSubmitTimestamp) - Number(detailsBeforeUpdate.lastTimestamp)) / tau);
             let expectedEma = Math.floor(Number(detailsBeforeUpdate.ema) * w + prices[i] * (1 - w))
 
             expect(await aggregator.getPrice(asset)).to.equal(expectedEma)
@@ -124,10 +122,9 @@ describe("Aggregator-SubmitData", function () {
             const detailsBeforeUpdate = await aggregator.assetDetails(asset)
             await aggregator.connect(keeper).submitRoundData([asset], [prices[i]], beforeSubmitTimestamp)
 
-            //calculate EMA
-            let currentTimestamp = await time.latest();
+            //calculate EMA using the keeper submit timestamp
             let tau = Number(await aggregator.EMA_WINDOW_SECONDS())
-            let w = Math.exp(-(Number(currentTimestamp) - Number(detailsBeforeUpdate.lastTimestamp)) / tau);
+            let w = Math.exp(-(Number(beforeSubmitTimestamp) - Number(detailsBeforeUpdate.lastTimestamp)) / tau);
             let expectedEma = Math.floor(Number(detailsBeforeUpdate.ema) * w + prices[i] * (1 - w))
 
             expect(await aggregator.getPrice(asset)).to.equal(expectedEma)
@@ -162,10 +159,9 @@ describe("Aggregator-SubmitData", function () {
             await aggregator.connect(keeper).submitRoundData(assets, prices[i], beforeSubmitTimestamp)
 
             for (let j in assets){
-                //calculate EMA for each asset
-                let currentTimestamp = await time.latest();
+                //calculate EMA for each asset using the keeper submit timestamp
                 let tau = Number(await aggregator.EMA_WINDOW_SECONDS())
-                let w = Math.exp(-(Number(currentTimestamp) - Number(detailsBeforeUpdate[j].lastTimestamp)) / tau);
+                let w = Math.exp(-(Number(beforeSubmitTimestamp) - Number(detailsBeforeUpdate[j].lastTimestamp)) / tau);
                 let expectedEma = Math.floor(Number(detailsBeforeUpdate[j].ema) * w + prices[i][j] * (1 - w))
 
                 expect(await aggregator.getPrice(assets[j])).to.equal(expectedEma)

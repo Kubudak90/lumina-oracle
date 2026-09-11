@@ -59,6 +59,9 @@ contract DualFallbackOracle is IAdapter {
     error InvalidDecimals();
     /// @notice thrown if emergency oracle price is invalid
     error InvalidEmergencyOracleData();
+    error UninitializedTimestamp();
+    error FutureTimestamp();
+    error BothOraclesUnhealthy();
 
     /// @notice emitted when emergency oracle use is toggled
     event SetEnableEmergencyOracle(bool isEnabled);
@@ -132,17 +135,21 @@ contract DualFallbackOracle is IAdapter {
         uint80 answeredInRound
     ) {
         if (isEmergencyOracleEnabled && address(EMERGENCY_SOURCE) != address(0)){
-            //if emergency latestRoundData, we want the tx to revert
             (
+                bool emergencyOk,
                 uint80 _roundIdEmergency,
                 int256 _answerEmergency,
                 uint256 _startedAtEmergency,
                 uint256 _updatedAtEmergency,
                 uint80 _answeredInRoundEmergency
-            ) = EMERGENCY_SOURCE.latestRoundData();
+            ) = _safeLatestRoundData(EMERGENCY_SOURCE);
 
-            require(_answerEmergency > 0, "emergency: invalid price");
-            require(block.timestamp - _updatedAtEmergency < MAX_HEARTBEAT_INTERVAL_FALLBACK, "emergency: stale");
+            if (!emergencyOk) revert InvalidEmergencyOracleData();
+            if (_answerEmergency <= 0) revert InvalidEmergencyOracleData();
+            _assertUsableTimestamp(_updatedAtEmergency);
+            if (block.timestamp - _updatedAtEmergency > MAX_HEARTBEAT_INTERVAL_FALLBACK) {
+                revert InvalidEmergencyOracleData();
+            }
 
             return (_roundIdEmergency, _answerEmergency, _startedAtEmergency, _updatedAtEmergency, _answeredInRoundEmergency);
         }
@@ -156,39 +163,22 @@ contract DualFallbackOracle is IAdapter {
             uint80 _answeredInRound
         ) = _safeLatestRoundData(PRIMARY_SOURCE);
 
-        //if primary isn't healthy, we first check if the fallback is also unhealthy
-        if (!_isPrimaryHealthy(_success, _answer, _updatedAt)){
-            if (!_success) {
-                // Primary reverted -- only use fallback if it's genuinely healthy
-                (
-                    ,
-                    int256 _fbAnswer,
-                    ,
-                    uint256 _fbUpdatedAt,
-
-                ) = FALLBACK_SOURCE.latestRoundData();
-
-                require(_isFallbackHealthy(_fbAnswer, _fbUpdatedAt), "both oracles unhealthy");
-                return (0, _fbAnswer, 0, _fbUpdatedAt, 0);
-            }
-
-            //we don't use _safeLatestRoundData here, since we want the tx to revert if both oracles revert
+        if (!_isHealthy(_success, _answer, _updatedAt, MAX_HEARTBEAT_INTERVAL_PRIMARY)){
             (
+                bool fbOk,
                 uint80 _roundIdFallback,
                 int256 _answerFallback,
                 uint256 _startedAtFallback,
                 uint256 _updatedAtFallback,
                 uint80 _answeredInRoundFallback
-            ) = FALLBACK_SOURCE.latestRoundData();
+            ) = _safeLatestRoundData(FALLBACK_SOURCE);
 
-            if (_isFallbackHealthy(_answerFallback, _updatedAtFallback)) {
+            if (_isHealthy(fbOk, _answerFallback, _updatedAtFallback, MAX_HEARTBEAT_INTERVAL_FALLBACK)) {
                 return (_roundIdFallback, _answerFallback, _startedAtFallback, _updatedAtFallback, _answeredInRoundFallback);
             }
-            // Both oracles unhealthy - revert
-            revert("both oracles unhealthy");
+            revert BothOraclesUnhealthy();
         }
 
-        //return round data from the main source
         roundId = _roundId;
         answer = _answer;
         startedAt = _startedAt;
@@ -218,29 +208,16 @@ contract DualFallbackOracle is IAdapter {
         }
     }
 
-    function _isPrimaryHealthy(bool _success, int256 _answer, uint256 _updatedAt) internal view returns (bool){
-        if (!_success) return false;
-
-        if (_answer <= 0){
-            return false;
-        }
-
-        if (block.timestamp > _updatedAt + MAX_HEARTBEAT_INTERVAL_PRIMARY) {
-            return false;
-        }
-
-        return true;
+    function _assertUsableTimestamp(uint256 _updatedAt) internal view {
+        if (_updatedAt == 0) revert UninitializedTimestamp();
+        if (_updatedAt > block.timestamp) revert FutureTimestamp();
     }
 
-    function _isFallbackHealthy(int256 _answer, uint256 _updatedAt) internal view returns (bool) {
-        if (_answer <= 0){
-            return false;
-        }
-
-        if (block.timestamp > _updatedAt + MAX_HEARTBEAT_INTERVAL_FALLBACK) {
-            return false;
-        }
-
+    function _isHealthy(bool _success, int256 _answer, uint256 _updatedAt, uint256 _maxHeartbeat) internal view returns (bool){
+        if (!_success) return false;
+        if (_answer <= 0) return false;
+        if (_updatedAt == 0 || _updatedAt > block.timestamp) return false;
+        if (block.timestamp - _updatedAt > _maxHeartbeat) return false;
         return true;
     }
 }

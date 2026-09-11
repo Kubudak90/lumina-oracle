@@ -223,6 +223,14 @@ async function deployDualFallbackOracle(primaryAddress, fallbackAddress, emergen
 async function main() {
     assertConfigured();
 
+    const network = await hre.ethers.provider.getNetwork();
+    if (network.chainId !== 84532n) {
+        throw new Error(
+            `Refusing to deploy: expected Base Sepolia (84532), got chainId ${network.chainId}. ` +
+            "Lighter REST endpoints are not a general-purpose EVM RPC."
+        );
+    }
+
     const [deployer] = await hre.ethers.getSigners();
     console.log("=".repeat(70));
     console.log("LighterEVM Oracle Infrastructure Deployment");

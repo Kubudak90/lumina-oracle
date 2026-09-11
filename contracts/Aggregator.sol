@@ -56,8 +56,8 @@ contract Aggregator is Ownable {
 
     /// @notice Last update timestamp for perp oracle prices
     mapping(address => uint256) public perpLastUpdateTimestamp;
-    /// @notice Last seen SystemOracle sysBlockNumber when perp timestamps were updated
-    uint256 public lastSeenSysBlock;
+    /// @notice Last seen SystemOracle sysBlockNumber per perp asset
+    mapping(address => uint256) public lastSeenSysBlockByAsset;
 
     /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                          EVENTS                            */
@@ -71,6 +71,8 @@ contract Aggregator is Ownable {
     event KeeperUpdated(address _keeper, bool _newState);
     ///@notice event emitted when an asset is deleted
     event AssetDeleted(address indexed _asset);
+    ///@notice event emitted when owner recovers a price beyond the 20% circuit breaker
+    event EmergencyPriceRecovered(address indexed _asset, uint256 _oldPrice, uint256 _newPrice, string _reason);
 
     /*.:.*:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.:.*.*/
     /*                        MODIFIERS                           */
@@ -109,14 +111,14 @@ contract Aggregator is Ownable {
     }
 
     /// @notice function used to read the timestamp of the last price update for a certain asset
-    /// @dev for perp assets, it returns block.timestamp
+    /// @dev returns 0 when a perp asset has never been updated; never fabricates block.timestamp
     function getUpdateTimestamp(address _asset) external view returns (uint256){
         require(assetDetails[_asset].exists == true, "getUpdateTimestamp: asset not found");
 
         AssetDetails memory _assetInfo = assetDetails[_asset];
 
         if (_assetInfo.isPerpOracle){
-            return perpLastUpdateTimestamp[_asset] > 0 ? perpLastUpdateTimestamp[_asset] : block.timestamp;
+            return perpLastUpdateTimestamp[_asset];
         } else {
             return _assetInfo.lastTimestamp;
         }
@@ -133,6 +135,7 @@ contract Aggregator is Ownable {
     ///@param _metaDecimals number of decimals of price in SystemOracle data (only for perp-oracle assets: price = x / Math.pow(10, 6 - decimals))
     ///@param _isUpdate indicates if asset is being added or updated
     function setAsset(address _asset, bool _isPerpOracle, uint32 _metaIndex, uint32 _metaDecimals, uint256 _price, bool _isUpdate) external onlyOwner() {
+        require(_asset != address(0), "setAsset: zero asset");
         require(_metaDecimals <= 6, "metaDecimals > 6");
         require(_price > 0, "price must be > 0");
 
@@ -168,9 +171,8 @@ contract Aggregator is Ownable {
             lastTimestamp: block.timestamp
         });
 
-        if (_isPerpOracle) {
-            perpLastUpdateTimestamp[_asset] = block.timestamp;
-        }
+        // Perp freshness comes from updatePerpTimestamps observing SystemOracle.
+        // Do not stamp block.timestamp here or getUpdateTimestamp will lie.
 
         //if asset is not a perp, we can use any (unused) random high number for metaIndex
         metaIndexes[_metaIndex] = _asset;
@@ -185,15 +187,43 @@ contract Aggregator is Ownable {
         emit KeeperUpdated(_keeper, keepers[_keeper]);
     }
 
+    /// @notice Owner recovery for a genuine move beyond the 20% circuit breaker.
+    /// @dev Does not disable deviation protection for later keeper/setAsset updates.
+    function emergencySetAssetPrice(address _asset, uint256 _price, string calldata _reason) external onlyOwner() {
+        require(_asset != address(0), "zero asset");
+        require(assetDetails[_asset].exists, "asset not found");
+        require(_price > 0, "price must be > 0");
+        require(bytes(_reason).length > 0, "reason required");
+        uint256 oldPrice = assetDetails[_asset].ema;
+        assetDetails[_asset].ema = _price;
+        assetDetails[_asset].lastTimestamp = block.timestamp;
+        emit EmergencyPriceRecovered(_asset, oldPrice, _price, _reason);
+        emit AssetChanged(
+            _asset,
+            assetDetails[_asset].isPerpOracle,
+            assetDetails[_asset].metaIndex,
+            assetDetails[_asset].metaDecimals,
+            _price,
+            true
+        );
+    }
+
     /// @notice Update perp oracle timestamps (called by keeper when system oracle updates)
-    /// @dev Requires that the SystemOracle has actually been updated (sysBlockNumber increased)
+    /// @dev Each asset is checked against its own last seen system block so omitting
+    ///      an asset from a batch does not lock it out of the same SystemOracle block.
     function updatePerpTimestamps(address[] calldata _assets) external onlyKeeper() {
+        require(_assets.length > 0, "empty assets");
         uint256 currentSysBlock = systemOracle.sysBlockNumber();
-        require(currentSysBlock > lastSeenSysBlock, "system oracle not updated");
-        lastSeenSysBlock = currentSysBlock;
         for (uint256 i = 0; i < _assets.length; i++) {
-            require(assetDetails[_assets[i]].exists && assetDetails[_assets[i]].isPerpOracle, "not a perp asset");
-            perpLastUpdateTimestamp[_assets[i]] = block.timestamp;
+            address asset = _assets[i];
+            require(asset != address(0), "zero asset");
+            for (uint256 j = 0; j < i; j++) {
+                require(_assets[j] != asset, "duplicate asset");
+            }
+            require(assetDetails[asset].exists && assetDetails[asset].isPerpOracle, "not a perp asset");
+            require(currentSysBlock > lastSeenSysBlockByAsset[asset], "system oracle not updated");
+            lastSeenSysBlockByAsset[asset] = currentSysBlock;
+            perpLastUpdateTimestamp[asset] = block.timestamp;
         }
     }
 
@@ -203,18 +233,26 @@ contract Aggregator is Ownable {
     ///@param _submitTimestamp unix timestamp (in seconds) when transaction was sent by the keeper
     ///@dev prices must be scaled to 8 decimals before they are submitted
     function submitRoundData(address[] calldata _assets, uint256[] calldata _prices, uint256 _submitTimestamp) external onlyKeeper() {
+        require(_submitTimestamp <= block.timestamp, "submitRoundData: future timestamp");
         require(block.timestamp - _submitTimestamp < MAX_TIMESTAMP_DELAY_SECONDS, "submitRoundData: expired");
+        require(_assets.length > 0, "submitRoundData: empty");
         require(_assets.length == _prices.length, "submitRoundData: length mismatch");
 
         for (uint256 i = 0; i < _assets.length; i++){
+            require(_assets[i] != address(0), "zero asset");
             require(_prices[i] > 0, "price must be > 0");
             require(assetDetails[_assets[i]].exists, "asset not found");
             require(!assetDetails[_assets[i]].isPerpOracle, "not a keeper asset");
             require(_submitTimestamp > assetDetails[_assets[i]].lastTimestamp, "timestamp not monotonic");
-            _calculateEma(_assets[i], _prices[i]);
+            for (uint256 j = 0; j < i; j++) {
+                require(_assets[j] != _assets[i], "duplicate asset");
+            }
+        }
+        for (uint256 i = 0; i < _assets.length; i++){
+            _calculateEma(_assets[i], _prices[i], _submitTimestamp);
         }
 
-        emit RoundDataSubmitted(_assets, _prices, block.timestamp);
+        emit RoundDataSubmitted(_assets, _prices, _submitTimestamp);
     }
 
     function deleteAsset(address _asset) external onlyOwner() {
@@ -222,6 +260,7 @@ contract Aggregator is Ownable {
         metaIndexes[assetDetails[_asset].metaIndex] = address(0);
         delete assetDetails[_asset];
         delete perpLastUpdateTimestamp[_asset];
+        delete lastSeenSysBlockByAsset[_asset];
         emit AssetDeleted(_asset);
     }
 
@@ -232,7 +271,7 @@ contract Aggregator is Ownable {
 
     ///@notice helper function used to calculate new EMA when price is added
     ///@dev we are using calculation for unevenly spaced time series
-    function _calculateEma(address _asset, uint256 _price) internal {
+    function _calculateEma(address _asset, uint256 _price, uint256 _submitTimestamp) internal {
         AssetDetails memory assetInfo = assetDetails[_asset];
 
         uint256 lastTimestamp = assetInfo.lastTimestamp;
@@ -250,11 +289,11 @@ contract Aggregator is Ownable {
         }
 
         //Andreas Eckner (2010): Algorithms for Unevenly Spaced Time Series: Moving Averages and Other Rolling Operators
-        int256 x = -int256(int256(block.timestamp - lastTimestamp) * 10**18 / EMA_WINDOW_SECONDS);
+        int256 x = -int256(int256(_submitTimestamp - lastTimestamp) * 10**18 / EMA_WINDOW_SECONDS);
         int256 alpha = FixedPointMathLib.expWad(x);
         uint256 newEma = uint256((int256(currentEma) * alpha + int256(_price) * (10**18 - alpha)) / 10**18);
 
-        assetDetails[_asset].lastTimestamp = block.timestamp;
+        assetDetails[_asset].lastTimestamp = _submitTimestamp;
         assetDetails[_asset].ema = newEma;
     }
 

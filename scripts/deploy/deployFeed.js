@@ -7,6 +7,7 @@
  *   DESCRIPTION        feed label, e.g. "WETH / USD (CoinGecko)"
  *   AAVE_ORACLE        (optional, default below) AaveOracle address
  *   MAX_DEVIATION_BPS  (optional, default 5000 = 50%)
+ *   MAX_STALENESS      (optional, default 3600 seconds)
  *
  * Usage:
  *   TOKEN=0x4200…0006 COINGECKO_ID=ethereum DESCRIPTION="WETH / USD (CoinGecko)" \
@@ -19,6 +20,7 @@ const hre = require("hardhat");
 
 const DEFAULT_AAVE_ORACLE = "0x0103951a20eD2bd84Bd79FE3719553A358893911";
 const DEFAULT_MAX_DEVIATION_BPS = 5_000;
+const DEFAULT_MAX_STALENESS = 3600;
 
 const AAVE_ORACLE_ABI = [
     "function setAssetSources(address[] assets, address[] sources) external",
@@ -50,6 +52,9 @@ async function main() {
     const MAX_DEVIATION_BPS = process.env.MAX_DEVIATION_BPS
         ? Number(process.env.MAX_DEVIATION_BPS)
         : DEFAULT_MAX_DEVIATION_BPS;
+    const MAX_STALENESS = process.env.MAX_STALENESS
+        ? Number(process.env.MAX_STALENESS)
+        : DEFAULT_MAX_STALENESS;
 
     if (!TOKEN || !COINGECKO_ID || !DESCRIPTION) {
         console.error("Missing required env: TOKEN, COINGECKO_ID, DESCRIPTION");
@@ -74,6 +79,7 @@ async function main() {
         DESCRIPTION,
         priceWei,
         MAX_DEVIATION_BPS,
+        MAX_STALENESS,
     ]);
     await Feed.waitForDeployment();
     const feedAddr = await Feed.getAddress();

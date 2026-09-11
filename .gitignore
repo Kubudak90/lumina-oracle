@@ -4,6 +4,9 @@ coverage
 coverage.json
 typechain
 typechain-types
+.claude/
+**/.claude/
+*.key
 
 # Hardhat files
 cache
