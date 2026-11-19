@@ -29,6 +29,8 @@ library MockMode {
     uint8 internal constant BAD_WORD = 3; // succeeds with a word outside the declared type
     uint8 internal constant BURN_GAS = 4; // consumes all forwarded gas
     uint8 internal constant LONG_RETURN = 5; // succeeds with 64 bytes
+    uint8 internal constant HUGE_RETURN = 6; // succeeds with 64 KiB
+    uint8 internal constant MAX_RETURN = 7; // spends ~90% of its gas on the largest possible return
 
     function act(uint8 mode, uint256 badWord) internal view {
         if (mode == REVERT) revert("mock revert");
@@ -52,6 +54,31 @@ library MockMode {
                 mstore(32, 1)
                 return(0, 64)
             }
+        }
+        if (mode == HUGE_RETURN) {
+            assembly {
+                mstore(0, 1)
+                return(0, 65536)
+            }
+        }
+        if (mode == MAX_RETURN) {
+            // memory cost of w words ≈ 3w + w²/512; pick w with w²/512 ≈ 90% of the gas left
+            uint256 target = (gasleft() * 9) / 10;
+            uint256 w = _sqrt(512 * target);
+            uint256 size = w * 32;
+            assembly {
+                return(0, size)
+            }
+        }
+    }
+
+    function _sqrt(uint256 x) private pure returns (uint256 y) {
+        if (x == 0) return 0;
+        y = x;
+        uint256 z = (x + 1) / 2;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
         }
     }
 }
@@ -119,6 +146,20 @@ contract MockDecimalsToken {
     constructor(uint8 decimals_) {
         decimals = decimals_;
     }
+}
+
+/// @notice Liquidation-like consumer: reads the dual oracle, then needs `workGas` more gas to
+/// finish (standing in for the rest of a liquidation).
+contract PriceConsumer {
+    function consume(address oracle, uint256 workGas) external view returns (uint256 rate) {
+        (, rate,) = IDualOracleLike(oracle).getPrices();
+        uint256 start = gasleft();
+        while (start - gasleft() < workGas) {}
+    }
+}
+
+interface IDualOracleLike {
+    function getPrices() external view returns (bool, uint256, uint256);
 }
 
 /// @notice Measures the gas a call consumes, so tests can prove a failed READ_CORE read burns

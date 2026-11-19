@@ -38,6 +38,8 @@ contract LighterDualOracle is IDualOracle {
     /// @notice Gas forwarded to `GUARD.isBorrowAllowed()`. A guard needs one READ_CORE read per
     /// guarded market (≤ 8; a failed read burns its source's stipend, 100k by default).
     uint256 public constant GUARD_CALL_GAS = 1_000_000;
+    /// @notice Gas kept back from the guard call so this oracle can always finish and return.
+    uint256 public constant GUARD_GAS_RESERVE = 20_000;
 
     /// @notice Pair asset (FraxLend `BASE_TOKEN`) and collateral (`QUOTE_TOKEN`).
     address public immutable ASSET;
@@ -139,14 +141,26 @@ contract LighterDualOracle is IDualOracle {
         return !(ok && valid && allowed);
     }
 
+    /// @dev Forwards min(GUARD_CALL_GAS, gasleft − GUARD_GAS_RESERVE) and copies at most 32
+    /// bytes of returndata, so neither a gas-burning nor an oversized response can starve this
+    /// oracle (and the liquidation calling it). `valid` = exactly 32 bytes encoding 0 or 1.
     function _callGuard() internal view returns (bool ok, bool valid, bool allowed) {
-        bytes memory ret;
-        (ok, ret) = address(GUARD).staticcall{gas: GUARD_CALL_GAS}(
-            abi.encodeCall(ILighterBorrowGuard.isBorrowAllowed, ())
-        );
-        if (!ok || ret.length != 32) return (ok, false, false);
-        uint256 word = abi.decode(ret, (uint256));
-        if (word > 1) return (ok, false, false);
+        uint256 available = gasleft();
+        if (available <= GUARD_GAS_RESERVE) return (false, false, false);
+        uint256 forward = available - GUARD_GAS_RESERVE;
+        if (forward > GUARD_CALL_GAS) forward = GUARD_CALL_GAS;
+        address guard = address(GUARD);
+        bytes4 selector = ILighterBorrowGuard.isBorrowAllowed.selector;
+        uint256 size;
+        uint256 word;
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, selector)
+            ok := staticcall(forward, guard, ptr, 4, ptr, 32)
+            size := returndatasize()
+            word := mload(ptr)
+        }
+        if (!ok || size != 32 || word > 1) return (ok, false, false);
         return (true, true, word == 1);
     }
 

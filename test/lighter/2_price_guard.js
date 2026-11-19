@@ -68,7 +68,7 @@ describe("Lighter: LuminaPriceGuard", function () {
       const base = [provider.address, guardian.address, keeper.address, 180, 300, 600];
       await expect(factory.deploy(ethers.ZeroAddress, ...base.slice(1))).to.be.revertedWithCustomError(factory, "ZeroAddress");
       await expect(factory.deploy(base[0], ethers.ZeroAddress, ...base.slice(2))).to.be.revertedWithCustomError(factory, "ZeroAddress");
-      for (const [index, value] of [[3, 29], [3, 3601], [4, 9], [4, 2001], [5, 59], [5, 30 * 86400 + 1]]) {
+      for (const [index, value] of [[3, 29], [3, 3601], [4, 9], [4, 2001], [5, 179], [5, 30 * 86400 + 1]]) {
         const args = [...base];
         args[index] = value;
         await expect(factory.deploy(...args)).to.be.revertedWithCustomError(factory, "OutOfBounds");
@@ -132,7 +132,7 @@ describe("Lighter: LuminaPriceGuard", function () {
       await guard.connect(guardian).addMarket(0, source.target);
       await guard.connect(keeper).postReference(0, 3000n * E8, await nextTimestamp());
       await expectStatus(guard, Status.OK);
-      for (const mode of [1, 2, 3, 4, 5]) { // revert, empty, bad word (-1), burn gas, 64-byte return
+      for (const mode of [1, 2, 3, 4, 5, 6]) { // revert, empty, bad word (-1), burn gas, 64-byte, 64-KiB return
         await source.setMode(mode);
         await expectStatus(guard, Status.CORE_READ_FAILED, 0n);
       }
@@ -141,6 +141,24 @@ describe("Lighter: LuminaPriceGuard", function () {
         await source.setAnswer(answer);
         await expectStatus(guard, Status.CORE_READ_FAILED, 0n);
       }
+    });
+
+    it("a malformed answer is rejected by poke too and never touches liveness state", async function () {
+      const { guard, guardian, keeper, other } = await loadFixture(fixture);
+      const source = await deploy("MockLighterPriceSource", 0, 3000n * E8);
+      await guard.connect(guardian).addMarket(0, source.target);
+      await guard.connect(keeper).postReference(0, 3000n * E8, await nextTimestamp());
+      const before = await guard.getMarket(0);
+      // 64-byte answer whose first word (1) differs from the stored price
+      await source.setMode(5);
+      await expect(guard.connect(other).poke(0)).to.be.revertedWithCustomError(guard, "CoreReadFailed").withArgs(0);
+      await expect(guard.connect(keeper).postReference(0, 3000n * E8, await nextTimestamp()))
+        .to.be.revertedWithCustomError(guard, "CoreReadFailed");
+      expect(await guard.getMarket(0)).to.deep.equal(before);
+      // back to a valid, unchanged price: no change is credited
+      await source.setMode(0);
+      await expect(guard.connect(other).poke(0)).to.not.emit(guard, "CorePriceChanged");
+      expect((await guard.getMarket(0))[5]).to.equal(before[5]);
     });
 
     it("handles references above uint64 and an int256.max live price without overflow", async function () {
@@ -298,7 +316,7 @@ describe("Lighter: LuminaPriceGuard", function () {
         .to.be.revertedWithCustomError(guard, "SourceMarketMismatch").withArgs(1, 0);
       await core.removeMarket(2);
       await expect(guard.connect(guardian).addMarket(2, await sources[2].getAddress()))
-        .to.be.revertedWithCustomError(sources[2], "ReadCoreFailed");
+        .to.be.revertedWithCustomError(guard, "CoreReadFailed").withArgs(2);
       await expect(guard.connect(guardian).addMarket(0, ethers.ZeroAddress)).to.be.revertedWithCustomError(guard, "ZeroAddress");
       const addTx = await guard.connect(guardian).addMarket(0, await sources[0].getAddress());
       await expect(addTx).to.emit(guard, "MarketAdded").withArgs(0, await sources[0].getAddress(), 3000n * E8);
@@ -340,7 +358,8 @@ describe("Lighter: LuminaPriceGuard", function () {
       await expect(guard.connect(guardian).setMaxDeviationBps(2000)).to.emit(guard, "MaxDeviationBpsUpdated").withArgs(2000);
       await expect(guard.connect(guardian).setMaxDeviationBps(2001)).to.be.revertedWithCustomError(guard, "OutOfBounds");
       await expect(guard.connect(guardian).setMaxCorePriceAge(30 * 86400)).to.emit(guard, "MaxCorePriceAgeUpdated");
-      await expect(guard.connect(guardian).setMaxCorePriceAge(59)).to.be.revertedWithCustomError(guard, "OutOfBounds");
+      await expect(guard.connect(guardian).setMaxCorePriceAge(179)).to.be.revertedWithCustomError(guard, "OutOfBounds");
+      await expect(guard.connect(guardian).setMaxCorePriceAge(180)).to.emit(guard, "MaxCorePriceAgeUpdated").withArgs(180);
       await expect(guard.connect(guardian).setKeeper(other.address)).to.emit(guard, "KeeperUpdated");
       expect(await guard.keeper()).to.equal(other.address);
     });

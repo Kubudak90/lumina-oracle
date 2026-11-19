@@ -71,13 +71,28 @@ describe("Lighter: LighterDualOracle", function () {
   it("treats any guard failure as bad data and still returns the rate (liquidations keep working)", async function () {
     const { usdcWeth, mockGuard } = await loadFixture(fixture);
     const [, rate] = await usdcWeth.getPrices();
-    // revert, empty return, non-bool word (2), burn all gas, 64-byte return
-    for (const mode of [1, 2, 3, 4, 5]) {
+    // revert, empty return, non-bool word (2), burn all gas, 64-byte return, 64-KiB return
+    for (const mode of [1, 2, 3, 4, 5, 6]) {
       await mockGuard.setMode(mode);
       expect(await usdcWeth.getPrices({ gasLimit: 3_000_000 }), `mode ${mode}`).to.deep.equal([true, rate, rate]);
     }
     await mockGuard.setMode(0);
     expect(await usdcWeth.getPrices()).to.deep.equal([false, rate, rate]);
+  });
+
+  it("a hostile guard costs a liquidation-like caller at most GUARD_CALL_GAS extra gas", async function () {
+    const { usdcWeth, mockGuard } = await loadFixture(fixture);
+    const consumer = await deploy("PriceConsumer");
+    const work = 200_000n; // gas the caller still needs after getPrices (rest of a liquidation)
+    const [, rate] = await usdcWeth.getPrices();
+    // healthy guard: a modest budget suffices
+    expect(await consumer.consume(usdcWeth.target, work, { gasLimit: 400_000 })).to.equal(rate);
+    // gas-burning guard, 64-KiB response, and a response as large as the 1M cap can pay for:
+    // cap + the caller's own needs always suffices (returndata copy is bounded to 32 bytes)
+    for (const mode of [4, 6, 7]) {
+      await mockGuard.setMode(mode);
+      expect(await consumer.consume(usdcWeth.target, work, { gasLimit: 1_350_000 }), `mode ${mode}`).to.equal(rate);
+    }
   });
 
   it("sets isBadData from the guard without touching the rate (guard false or reverting)", async function () {

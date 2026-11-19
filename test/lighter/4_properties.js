@@ -96,7 +96,7 @@ describe("Lighter: property tests (seeded, ≥500 cases each)", function () {
       const snapshot = await network.provider.send("evm_snapshot", []);
       const maxRefAge = r.int(30, 3600);
       const maxDeviationBps = r.int(10, 2000);
-      const maxCorePriceAge = r.int(60, 30 * 86400);
+      const maxCorePriceAge = r.int(180, 30 * 86400);
       const ref = r.chance(0.15) ? r.big(2n ** 64n, 2n ** 128n - 1n) : r.big(E8, 100_000n * E8);
       const devBps = r.chance(0.5) ? near(maxDeviationBps, 3) : r.int(0, 15_000);
       let live = r.chance(0.5) ? ref + (ref * BigInt(devBps)) / 10_000n : ref - (ref * BigInt(Math.min(devBps, 9_999))) / 10_000n;
@@ -123,23 +123,30 @@ describe("Lighter: property tests (seeded, ≥500 cases each)", function () {
       const P = T - BigInt(c.coreAge);
       const observedAt = T - BigInt(c.refAge);
       const Q = observedAt > P + 3n ? observedAt : P + 3n;
+      // every transaction gets an explicit timestamp (no wall-clock dependence)
       await setNextTimestamp(start);
       await guard.connect(guardian).setMaxRefAge(c.maxRefAge);
+      await setNextTimestamp(start + 1n);
       await guard.connect(guardian).setMaxDeviationBps(c.maxDeviationBps);
+      await setNextTimestamp(start + 2n);
       await guard.connect(guardian).setMaxCorePriceAge(c.maxCorePriceAge);
       const stored = (await guard.getMarket(0))[4];
       const corePriceAfterP = stored === E8 ? 2n * E8 : E8; // differs from stored
       await setNextTimestamp(P);
       await guard.poke(0); // observation at P, unchanged
+      await setNextTimestamp(P + 1n);
       await source.setAnswer(corePriceAfterP);
       await setNextTimestamp(P + 2n);
       await guard.poke(0); // change seen at P + 2, dated at P
       expect((await guard.getMarket(0))[5]).to.equal(P);
       await setNextTimestamp(Q);
       await guard.connect(keeper).postReference(0, c.ref, observedAt); // also pokes: price unchanged
+      await setNextTimestamp(Q + 1n);
       await source.setAnswer(c.live); // live Core moves; not poked → liveness stays at P
-      if (c.liveRevert) await source.setShouldRevert(true);
-      if (c.paused) await guard.connect(guardian).setBorrowsPaused(true);
+      await setNextTimestamp(Q + 2n);
+      await source.setShouldRevert(c.liveRevert);
+      await setNextTimestamp(Q + 3n);
+      await guard.connect(guardian).setBorrowsPaused(c.paused);
       await mineAt(T);
 
       const expected = guardModel(c);

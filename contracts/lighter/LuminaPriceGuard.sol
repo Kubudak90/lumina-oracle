@@ -41,7 +41,10 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
     uint256 public constant MAX_REF_AGE = 1 hours;
     uint256 public constant MIN_DEVIATION_BPS = 10;
     uint256 public constant MAX_DEVIATION_BPS = 2_000;
-    uint256 public constant MIN_CORE_PRICE_AGE = 60;
+    /// @dev Changes are dated at the previous observation, so with honest pokes every `i`
+    /// seconds a live index can look up to ~2·i old. Keep `maxCorePriceAge` ≥ 2·i plus inclusion
+    /// jitter; 180 s covers the 60 s keeper heartbeat (spec default 600 s).
+    uint256 public constant MIN_CORE_PRICE_AGE = 180;
     uint256 public constant MAX_CORE_PRICE_AGE = 30 days;
 
     /// @notice Reasons returned by `borrowStatus()`.
@@ -108,7 +111,7 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
     error MarketNotGuarded(uint16 marketId);
     error TooManyMarkets();
     error SourceMarketMismatch(uint16 marketId, uint16 sourceMarketId);
-    error InvalidCorePrice(uint16 marketId, int256 price);
+    error CoreReadFailed(uint16 marketId);
     error InvalidReferencePrice(uint256 price);
     error ObservedAtNotIncreasing(uint64 observedAt, uint64 lastObservedAt);
     error ObservedAtInFuture(uint64 observedAt, uint256 nowTimestamp);
@@ -201,14 +204,8 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
         // NOT treated as fresh, so a keeper that stops poking cannot keep borrows open.
         if (block.timestamp - market.lastCoreChangeAt > maxCorePriceAge) return Status.CORE_PRICE_STALE;
 
-        // Low-level call with strict decoding: a revert, a short/long return or a non-positive
-        // answer all mean CORE_READ_FAILED. (`try/catch` would not catch a decoding failure.)
-        (bool ok, bytes memory ret) =
-            address(market.source).staticcall(abi.encodeCall(ILighterMarketPriceSource.latestAnswer, ()));
-        if (!ok || ret.length != 32) return Status.CORE_READ_FAILED;
-        int256 answer = abi.decode(ret, (int256));
-        if (answer <= 0) return Status.CORE_READ_FAILED;
-        uint256 core = uint256(answer);
+        (bool ok, uint256 core) = _tryReadCore(market.source);
+        if (!ok) return Status.CORE_READ_FAILED;
 
         uint256 ref = market.refPrice; // <= type(uint128).max (enforced when posted)
         uint256 diff = core > ref ? core - ref : ref - core;
@@ -253,10 +250,30 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
         market.lastObservedAt = uint64(block.timestamp);
     }
 
-    function _readCore(uint16 marketId, ILighterMarketPriceSource source) private view returns (uint256) {
-        int256 answer = source.latestAnswer();
-        if (answer <= 0) revert InvalidCorePrice(marketId, answer);
-        return uint256(answer);
+    function _readCore(uint16 marketId, ILighterMarketPriceSource source) private view returns (uint256 price) {
+        bool ok;
+        (ok, price) = _tryReadCore(source);
+        if (!ok) revert CoreReadFailed(marketId);
+    }
+
+    /// @dev The one decoder for every Core read (`borrowStatus`, `poke`, `postReference`,
+    /// `addMarket`): ok only if the call succeeds with exactly 32 bytes encoding a positive
+    /// int256. At most 32 bytes of returndata are copied, so an oversized response cannot burn
+    /// the caller's gas, and a failed read never updates liveness state.
+    function _tryReadCore(ILighterMarketPriceSource source) private view returns (bool ok, uint256 price) {
+        bytes4 selector = ILighterMarketPriceSource.latestAnswer.selector;
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, selector)
+            let success := staticcall(gas(), source, ptr, 4, ptr, 32)
+            if and(success, eq(returndatasize(), 32)) {
+                let answer := mload(ptr)
+                if sgt(answer, 0) {
+                    ok := 1
+                    price := answer
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------------- guardian admin
