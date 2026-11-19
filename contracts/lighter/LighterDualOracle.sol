@@ -28,10 +28,16 @@ interface ILighterBorrowGuard {
 /// removal by borrowers) while repay, add-collateral, lending and liquidation keep working.
 /// Keeper reference prices are never used in the rate: a compromised keeper can only set
 /// `isBadData`, never move valuations. A failed source read reverts (no price, no fallback).
+/// The guard is called last, low-level, with at most `GUARD_CALL_GAS`; any failure (revert,
+/// out of gas, malformed return) counts as bad data, so a broken guard can block borrows but
+/// never `getPrices()` (and so never liquidations).
 contract LighterDualOracle is IDualOracle {
     uint256 public constant override ORACLE_PRECISION = 1e18;
     uint8 internal constant DECIMALS = 18;
     uint256 internal constant MAX_TOKEN_DECIMALS = 18;
+    /// @notice Gas forwarded to `GUARD.isBorrowAllowed()`. A guard needs one READ_CORE read per
+    /// guarded market (≤ 8; a failed read burns its source's stipend, 100k by default).
+    uint256 public constant GUARD_CALL_GAS = 1_000_000;
 
     /// @notice Pair asset (FraxLend `BASE_TOKEN`) and collateral (`QUOTE_TOKEN`).
     address public immutable ASSET;
@@ -52,6 +58,7 @@ contract LighterDualOracle is IDualOracle {
     error UnsupportedDecimals();
     error InvalidSourcePrice(address source, int256 price);
     error ZeroRate();
+    error InvalidGuard();
 
     constructor(
         address asset,
@@ -80,14 +87,22 @@ contract LighterDualOracle is IDualOracle {
         // Exponent >= 0 because both decimals are <= 18.
         RATE_NORMALIZATION = 10 ** (18 + assetDecimals - collateralDecimals);
         _name = name_;
+
+        // Wiring checks: both sources must price now, and the guard must be a contract that
+        // answers isBorrowAllowed() with a well-formed bool.
+        _rate();
+        if (address(guard).code.length == 0) revert InvalidGuard();
+        (bool ok, bool valid,) = _callGuard();
+        if (!ok || !valid) revert InvalidGuard();
     }
 
     // --------------------------------------------------------------------------- prices
 
     /// @inheritdoc IDualOracle
     function getPrices() external view override returns (bool isBadData, uint256 priceLow, uint256 priceHigh) {
-        uint256 rate = _rate();
-        return (_isBadData(), rate, rate);
+        uint256 rate = _rate(); // reverts without a price
+        isBadData = _isBadData(); // never reverts
+        return (isBadData, rate, rate);
     }
 
     /// @notice Same as `getPrices()` but in whole-token terms (1e18 = one collateral token per
@@ -99,7 +114,8 @@ contract LighterDualOracle is IDualOracle {
         returns (bool isBadData, uint256 priceLow, uint256 priceHigh)
     {
         uint256 rate = _normalize(_rate());
-        return (_isBadData(), rate, rate);
+        isBadData = _isBadData();
+        return (isBadData, rate, rate);
     }
 
     function _rate() internal view returns (uint256 rate) {
@@ -117,13 +133,21 @@ contract LighterDualOracle is IDualOracle {
         return uint256(answer);
     }
 
-    /// @dev A guard that reverts counts as bad data.
+    /// @dev Any guard failure counts as bad data.
     function _isBadData() internal view returns (bool) {
-        try GUARD.isBorrowAllowed() returns (bool allowed) {
-            return !allowed;
-        } catch {
-            return true;
-        }
+        (bool ok, bool valid, bool allowed) = _callGuard();
+        return !(ok && valid && allowed);
+    }
+
+    function _callGuard() internal view returns (bool ok, bool valid, bool allowed) {
+        bytes memory ret;
+        (ok, ret) = address(GUARD).staticcall{gas: GUARD_CALL_GAS}(
+            abi.encodeCall(ILighterBorrowGuard.isBorrowAllowed, ())
+        );
+        if (!ok || ret.length != 32) return (ok, false, false);
+        uint256 word = abi.decode(ret, (uint256));
+        if (word > 1) return (ok, false, false);
+        return (true, true, word == 1);
     }
 
     function _normalize(uint256 rate) internal view returns (uint256) {

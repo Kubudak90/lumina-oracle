@@ -68,6 +68,18 @@ describe("Lighter: LighterDualOracle", function () {
     expect((await wethUsdc.getPricesNormalized())[1]).to.equal(3000n * 10n ** 18n); // USDC per WETH
   });
 
+  it("treats any guard failure as bad data and still returns the rate (liquidations keep working)", async function () {
+    const { usdcWeth, mockGuard } = await loadFixture(fixture);
+    const [, rate] = await usdcWeth.getPrices();
+    // revert, empty return, non-bool word (2), burn all gas, 64-byte return
+    for (const mode of [1, 2, 3, 4, 5]) {
+      await mockGuard.setMode(mode);
+      expect(await usdcWeth.getPrices({ gasLimit: 3_000_000 }), `mode ${mode}`).to.deep.equal([true, rate, rate]);
+    }
+    await mockGuard.setMode(0);
+    expect(await usdcWeth.getPrices()).to.deep.equal([false, rate, rate]);
+  });
+
   it("sets isBadData from the guard without touching the rate (guard false or reverting)", async function () {
     const { usdcWeth, mockGuard } = await loadFixture(fixture);
     const [, rate] = await usdcWeth.getPrices();
@@ -104,13 +116,14 @@ describe("Lighter: LighterDualOracle", function () {
 
   it("rejects non-positive source answers and a rate that rounds to zero", async function () {
     const { usdc, weth, mockGuard } = await loadFixture(fixture);
-    const assetSource = await deploy("MockLighterPriceSource", 0, 0);
+    const assetSource = await deploy("MockLighterPriceSource", 0, E8);
     const collateralSource = await deploy("MockLighterPriceSource", 0, E8);
     const coarse = await deploy("MockDecimalsToken", 0);
     const oracle = await deploy(
       "LighterDualOracle", await weth.getAddress(), await coarse.getAddress(), await assetSource.getAddress(),
       await collateralSource.getAddress(), await mockGuard.getAddress(), "x",
     );
+    await assetSource.setAnswer(0);
     await expect(oracle.getPrices()).to.be.revertedWithCustomError(oracle, "InvalidSourcePrice");
     await assetSource.setAnswer(-1);
     await expect(oracle.getPrices()).to.be.revertedWithCustomError(oracle, "InvalidSourcePrice");
@@ -134,6 +147,20 @@ describe("Lighter: LighterDualOracle", function () {
     const odd = await deploy("MockDecimalsToken", 19);
     await expect(factory.deploy(odd.target, weth.target, usdSource.target, ethSource.target, mockGuard.target, "x"))
       .to.be.revertedWithCustomError(factory, "UnsupportedDecimals");
+
+    // wiring checks: an EOA or a malformed guard, or a source that cannot price, is rejected
+    const [eoa] = await ethers.getSigners();
+    await expect(factory.deploy(usdc.target, weth.target, usdSource.target, ethSource.target, eoa.address, "x"))
+      .to.be.revertedWithCustomError(factory, "InvalidGuard");
+    for (const mode of [1, 2, 3, 5]) {
+      await mockGuard.setMode(mode);
+      await expect(factory.deploy(usdc.target, weth.target, usdSource.target, ethSource.target, mockGuard.target, "x"))
+        .to.be.revertedWithCustomError(factory, "InvalidGuard");
+    }
+    await mockGuard.setMode(0);
+    const deadSource = await deploy("MockLighterPriceSource", 0, 0);
+    await expect(factory.deploy(usdc.target, weth.target, deadSource.target, ethSource.target, mockGuard.target, "x"))
+      .to.be.revertedWithCustomError(factory, "InvalidSourcePrice");
   });
 
   it("implements the IDualOracle getters and ERC165", async function () {

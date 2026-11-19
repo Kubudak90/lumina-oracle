@@ -97,11 +97,11 @@ describe("Lighter: property tests (seeded, ≥500 cases each)", function () {
       const maxRefAge = r.int(30, 3600);
       const maxDeviationBps = r.int(10, 2000);
       const maxCorePriceAge = r.int(60, 30 * 86400);
-      const ref = r.chance(0.1) ? r.big(1n, 2n ** 128n - 1n) : r.big(E8, 100_000n * E8);
+      const ref = r.chance(0.15) ? r.big(2n ** 64n, 2n ** 128n - 1n) : r.big(E8, 100_000n * E8);
       const devBps = r.chance(0.5) ? near(maxDeviationBps, 3) : r.int(0, 15_000);
       let live = r.chance(0.5) ? ref + (ref * BigInt(devBps)) / 10_000n : ref - (ref * BigInt(Math.min(devBps, 9_999))) / 10_000n;
       if (live <= 0n) live = 1n;
-      if (r.chance(0.03)) live = 2n ** 200n; // extreme live price (no overflow, just deviation)
+      if (r.chance(0.03)) live = 2n ** 255n - 1n; // int256.max: must be DEVIATION, never an overflow
       const c = {
         maxRefAge,
         maxDeviationBps,
@@ -115,22 +115,26 @@ describe("Lighter: property tests (seeded, ≥500 cases each)", function () {
         liveRevert: r.chance(0.08),
       };
 
-      // Timeline: setters at S, Core change recorded at P = T − coreAge (poke), reference posted at
-      // Q with observedAt = T − refAge, live price moved after Q without a poke, evaluate at T.
+      // Timeline: setters at S; an observation (poke, unchanged price) at P = T − coreAge; Core
+      // moves and a poke at P + 2 records the change, dated at P; reference posted at Q with
+      // observedAt = T − refAge; live price moved after Q without a poke; evaluate at T.
       const start = (await now()) + 10n;
       const T = start + 50n * 86400n;
       const P = T - BigInt(c.coreAge);
       const observedAt = T - BigInt(c.refAge);
-      const Q = observedAt > P + 1n ? observedAt : P + 1n;
+      const Q = observedAt > P + 3n ? observedAt : P + 3n;
       await setNextTimestamp(start);
       await guard.connect(guardian).setMaxRefAge(c.maxRefAge);
       await guard.connect(guardian).setMaxDeviationBps(c.maxDeviationBps);
       await guard.connect(guardian).setMaxCorePriceAge(c.maxCorePriceAge);
       const stored = (await guard.getMarket(0))[4];
-      const corePriceAtP = stored === E8 ? 2n * E8 : E8; // differs from stored, so the poke records P
-      await source.setAnswer(corePriceAtP);
+      const corePriceAfterP = stored === E8 ? 2n * E8 : E8; // differs from stored
       await setNextTimestamp(P);
-      await guard.poke(0);
+      await guard.poke(0); // observation at P, unchanged
+      await source.setAnswer(corePriceAfterP);
+      await setNextTimestamp(P + 2n);
+      await guard.poke(0); // change seen at P + 2, dated at P
+      expect((await guard.getMarket(0))[5]).to.equal(P);
       await setNextTimestamp(Q);
       await guard.connect(keeper).postReference(0, c.ref, observedAt); // also pokes: price unchanged
       await source.setAnswer(c.live); // live Core moves; not poked → liveness stays at P

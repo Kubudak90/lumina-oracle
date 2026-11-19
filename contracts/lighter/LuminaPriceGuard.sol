@@ -19,14 +19,18 @@ interface ILighterMarketPriceSource {
 /// Borrows are allowed only while, for every guarded market:
 ///  1. the keeper's reference is at most `maxRefAge` old;
 ///  2. the Core index price changed at most `maxCorePriceAge` ago, as recorded on-chain by the
-///     permissionless `poke` (a keeper key cannot fake a Core price change);
+///     permissionless `poke` (a keeper key cannot fake a Core price change). A detected change is
+///     dated conservatively at the *previous* observation (the change happened after it), so
+///     observing the last pre-freeze move late cannot stretch the freeze window;
 ///  3. the live Core price is readable and within `maxDeviationBps` of the reference;
 /// and the guardian has not paused borrows.
 ///
 /// Trust model: the keeper is trusted for reference freshness only. It can stop borrows (go
 /// silent or post a deviating price) but can never change a valuation price or block
 /// liquidations (`isLiquidationAllowed()` is always true). A compromised keeper combined with a
-/// Core freeze keeps borrows open for at most `maxCorePriceAge`.
+/// Core freeze keeps borrows open for at most `maxCorePriceAge` after the last observation of
+/// the pre-freeze price. This bound is relative to the Core snapshot visible to the EVM: Core
+/// lag behind its own tip is not observable on-chain (the keeper's stall watchdog covers it).
 contract LuminaPriceGuard is IPriceOracleSentinel {
     // ------------------------------------------------------------------ constants & bounds
 
@@ -59,7 +63,8 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
         uint256 refPrice; // 8 decimals
         uint64 refObservedAt;
         uint256 corePrice; // 8 decimals, last value recorded by `_poke`
-        uint64 lastCoreChangeAt;
+        uint64 lastCoreChangeAt; // conservative: the observation before the change was seen
+        uint64 lastObservedAt; // last successful Core read by `_poke`
     }
 
     // ------------------------------------------------------------------------------- state
@@ -90,7 +95,7 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
     event MarketAdded(uint16 indexed marketId, address source, uint256 corePrice);
     event MarketRemoved(uint16 indexed marketId);
     event ReferencePosted(uint16 indexed marketId, uint256 price, uint64 observedAt);
-    event CorePriceChanged(uint16 indexed marketId, uint256 previousPrice, uint256 newPrice);
+    event CorePriceChanged(uint16 indexed marketId, uint256 previousPrice, uint256 newPrice, uint64 datedAt);
 
     // ------------------------------------------------------------------------------ errors
 
@@ -196,13 +201,14 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
         // NOT treated as fresh, so a keeper that stops poking cannot keep borrows open.
         if (block.timestamp - market.lastCoreChangeAt > maxCorePriceAge) return Status.CORE_PRICE_STALE;
 
-        uint256 core;
-        try market.source.latestAnswer() returns (int256 answer) {
-            if (answer <= 0) return Status.CORE_READ_FAILED;
-            core = uint256(answer);
-        } catch {
-            return Status.CORE_READ_FAILED;
-        }
+        // Low-level call with strict decoding: a revert, a short/long return or a non-positive
+        // answer all mean CORE_READ_FAILED. (`try/catch` would not catch a decoding failure.)
+        (bool ok, bytes memory ret) =
+            address(market.source).staticcall(abi.encodeCall(ILighterMarketPriceSource.latestAnswer, ()));
+        if (!ok || ret.length != 32) return Status.CORE_READ_FAILED;
+        int256 answer = abi.decode(ret, (int256));
+        if (answer <= 0) return Status.CORE_READ_FAILED;
+        uint256 core = uint256(answer);
 
         uint256 ref = market.refPrice; // <= type(uint128).max (enforced when posted)
         uint256 diff = core > ref ? core - ref : ref - core;
@@ -238,10 +244,13 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
         uint256 core = _readCore(marketId, market.source);
         uint256 previous = market.corePrice;
         if (core != previous) {
+            // The change happened after the previous observation: date it there, never later.
+            uint64 datedAt = market.lastObservedAt;
             market.corePrice = core;
-            market.lastCoreChangeAt = uint64(block.timestamp);
-            emit CorePriceChanged(marketId, previous, core);
+            market.lastCoreChangeAt = datedAt;
+            emit CorePriceChanged(marketId, previous, core, datedAt);
         }
+        market.lastObservedAt = uint64(block.timestamp);
     }
 
     function _readCore(uint16 marketId, ILighterMarketPriceSource source) private view returns (uint256) {
@@ -268,6 +277,7 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
         market.refObservedAt = 0;
         market.corePrice = core;
         market.lastCoreChangeAt = uint64(block.timestamp);
+        market.lastObservedAt = uint64(block.timestamp);
         _marketIds.push(marketId);
         emit MarketAdded(marketId, address(source), core);
     }
@@ -337,11 +347,14 @@ contract LuminaPriceGuard is IPriceOracleSentinel {
             uint256 refPrice,
             uint64 refObservedAt,
             uint256 corePrice,
-            uint64 lastCoreChangeAt
+            uint64 lastCoreChangeAt,
+            uint64 lastObservedAt
         )
     {
         Market storage m = _markets[marketId];
-        return (m.guarded, address(m.source), m.refPrice, m.refObservedAt, m.corePrice, m.lastCoreChangeAt);
+        return (
+            m.guarded, address(m.source), m.refPrice, m.refObservedAt, m.corePrice, m.lastCoreChangeAt, m.lastObservedAt
+        );
     }
 
     // ----------------------------------------------------------------------------- internal

@@ -46,7 +46,16 @@ function rng(seed) {
     z = BigInt.asUintN(64, (z ^ (z >> 27n)) * 0x94d049bb133111ebn);
     return z ^ (z >> 31n);
   };
-  const below = (n) => next64() % BigInt(n); // n <= 2^64; modulo bias is irrelevant here
+  // Uniform-ish in [0, n) for any n: draws as many 64-bit words as n needs (modulo bias is
+  // irrelevant here).
+  const below = (n) => {
+    const bound = BigInt(n);
+    let words = 1n;
+    while (1n << (64n * words) < bound) words += 1n;
+    let value = 0n;
+    for (let i = 0n; i < words; i += 1n) value = (value << 64n) | next64();
+    return value % bound;
+  };
   return {
     next64,
     below,
@@ -54,10 +63,10 @@ function rng(seed) {
     big: (min, max) => BigInt(min) + below(BigInt(max) - BigInt(min) + 1n),
     chance: (p) => Number(below(1_000_000n)) < p * 1_000_000,
     pick: (items) => items[Number(below(items.length))],
-    // log-uniform positive integer in [1, 2^bits)
+    // log-uniform positive integer in [1, 2^bits), any bits
     magnitude: (bits) => {
       const b = BigInt(1 + Number(below(BigInt(bits))));
-      return (next64() % (1n << b)) | 1n;
+      return below(1n << b) | 1n;
     },
   };
 }

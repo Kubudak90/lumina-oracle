@@ -126,6 +126,37 @@ describe("Lighter: LuminaPriceGuard", function () {
       await expect(guard.poke(0)).to.be.reverted;
     });
 
+    it("treats a malformed or failing source answer as CORE_READ_FAILED, never reverting", async function () {
+      const { guard, guardian, keeper } = await loadFixture(fixture);
+      const source = await deploy("MockLighterPriceSource", 0, 3000n * E8);
+      await guard.connect(guardian).addMarket(0, source.target);
+      await guard.connect(keeper).postReference(0, 3000n * E8, await nextTimestamp());
+      await expectStatus(guard, Status.OK);
+      for (const mode of [1, 2, 3, 4, 5]) { // revert, empty, bad word (-1), burn gas, 64-byte return
+        await source.setMode(mode);
+        await expectStatus(guard, Status.CORE_READ_FAILED, 0n);
+      }
+      await source.setMode(0);
+      for (const answer of [0n, -1n]) {
+        await source.setAnswer(answer);
+        await expectStatus(guard, Status.CORE_READ_FAILED, 0n);
+      }
+    });
+
+    it("handles references above uint64 and an int256.max live price without overflow", async function () {
+      const { guard, guardian, keeper } = await loadFixture(fixture);
+      const wide = 2n ** 100n;
+      const source = await deploy("MockLighterPriceSource", 0, wide);
+      await guard.connect(guardian).addMarket(0, source.target);
+      await guard.connect(keeper).postReference(0, wide, await nextTimestamp()); // matching, > uint64.max
+      await expectStatus(guard, Status.OK);
+      await guard.connect(keeper).postReference(0, 2n ** 128n - 1n, await nextTimestamp());
+      await expectStatus(guard, Status.DEVIATION, 0n);
+      await source.setAnswer(2n ** 255n - 1n); // int256.max: diff * BPS would overflow without the short-circuit
+      await guard.connect(keeper).postReference(0, 2n ** 127n, await nextTimestamp()); // pokes int256.max
+      await expectStatus(guard, Status.DEVIATION, 0n);
+    });
+
     it("guardian pause blocks borrows; unpause restores them", async function () {
       const { guard, guardian, other } = await loadFixture(guardedFixture);
       await expect(guard.connect(other).setBorrowsPaused(true)).to.be.revertedWithCustomError(guard, "NotGuardian");
@@ -179,13 +210,40 @@ describe("Lighter: LuminaPriceGuard", function () {
       await core.setPrices(0, 300_100n, 300_100n); // live Core moved, nobody poked yet
       await expectStatus(guard, Status.CORE_PRICE_STALE, 0n); // un-poked change does not count
 
+      // the change happened after the keeper's poke, so it is dated at that observation
+      const [, , , , , , observedBefore] = await guard.getMarket(0);
       await expect(guard.connect(other).poke(0))
         .to.emit(guard, "CorePriceChanged")
-        .withArgs(0, 3000n * E8, 3001n * E8);
+        .withArgs(0, 3000n * E8, 3001n * E8, observedBefore);
       await expectStatus(guard, Status.OK);
-      const [, , , , corePrice, lastCoreChangeAt] = await guard.getMarket(0);
+      const [, , , , corePrice, lastCoreChangeAt, lastObservedAt] = await guard.getMarket(0);
       expect(corePrice).to.equal(3001n * E8);
-      expect(lastCoreChangeAt).to.equal(await now());
+      expect(lastCoreChangeAt).to.equal(observedBefore);
+      expect(lastObservedAt).to.equal(await now());
+    });
+
+    it("observing the last pre-freeze move late does not stretch the freeze window (dated at the previous observation)", async function () {
+      const { guard, core, keeper } = await loadFixture(guardedFixture);
+      const [, , , , , , observedAt0] = await guard.getMarket(0); // keeper's post in the fixture
+      await core.setPrices(0, 300_100n, 300_100n); // final move to 3001.00, then Core freezes
+
+      // a hostile keeper waits almost maxRefAge before its next post (which pokes)
+      let t = observedAt0 + MAX_REF_AGE - 1n;
+      await time.setNextBlockTimestamp(t);
+      await guard.connect(keeper).postReference(0, 3001n * E8, t);
+      const [, , , , , lastCoreChangeAt] = await guard.getMarket(0);
+      expect(lastCoreChangeAt).to.equal(observedAt0); // not t
+
+      // matching heartbeats cannot keep borrows open past observedAt0 + maxCorePriceAge
+      for (t += 60n; t <= observedAt0 + MAX_CORE_PRICE_AGE; t += 60n) {
+        await time.setNextBlockTimestamp(t);
+        await guard.connect(keeper).postReference(0, 3001n * E8, t);
+        await expectStatus(guard, Status.OK);
+      }
+      t = observedAt0 + MAX_CORE_PRICE_AGE + 1n;
+      await time.setNextBlockTimestamp(t);
+      await guard.connect(keeper).postReference(0, 3001n * E8, t);
+      await expectStatus(guard, Status.CORE_PRICE_STALE, 0n);
     });
 
     it("a poke with an unchanged price does not refresh liveness", async function () {
@@ -247,9 +305,9 @@ describe("Lighter: LuminaPriceGuard", function () {
       const addedAt = BigInt((await ethers.provider.getBlock((await addTx.wait()).blockNumber)).timestamp);
       await expect(guard.connect(guardian).addMarket(0, await sources[0].getAddress()))
         .to.be.revertedWithCustomError(guard, "MarketAlreadyGuarded");
-      const [guarded, source, refPrice, refObservedAt, corePrice, lastCoreChangeAt] = await guard.getMarket(0);
-      expect([guarded, source, refPrice, refObservedAt, corePrice, lastCoreChangeAt]).to.deep.equal(
-        [true, await sources[0].getAddress(), 0n, 0n, 3000n * E8, addedAt],
+      const [guarded, source, refPrice, refObservedAt, corePrice, lastCoreChangeAt, lastObservedAt] = await guard.getMarket(0);
+      expect([guarded, source, refPrice, refObservedAt, corePrice, lastCoreChangeAt, lastObservedAt]).to.deep.equal(
+        [true, await sources[0].getAddress(), 0n, 0n, 3000n * E8, addedAt, addedAt],
       );
     });
 

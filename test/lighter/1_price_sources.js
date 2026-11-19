@@ -63,14 +63,21 @@ describe("Lighter: LighterCorePriceSource", function () {
     await expect(unknown.latestAnswer()).to.be.revertedWithCustomError(unknown, "ReadCoreFailed").withArgs(999);
 
     const data = unknown.interface.encodeFunctionData("latestAnswer");
-    const [ok, gasUsed] = await meter.measure(await unknown.getAddress(), data, { gas: 5_000_000 });
+    const [ok, gasUsed] = await meter.measure(await unknown.getAddress(), data, { gasLimit: 5_000_000 });
     expect(ok).to.equal(false);
     expect(gasUsed).to.be.gte(DEFAULT_STIPEND); // the failed read burned the stipend...
     expect(gasUsed).to.be.lt(DEFAULT_STIPEND + 30_000n); // ...but not the caller's remaining gas
 
-    const [okValid, gasValid] = await meter.measure(await source.getAddress(), data, { gas: 5_000_000 });
+    const [okValid, gasValid] = await meter.measure(await source.getAddress(), data, { gasLimit: 5_000_000 });
     expect(okValid).to.equal(true);
     expect(gasValid).to.be.lt(DEFAULT_STIPEND);
+
+    // a caller with a tight budget (below the stipend × 64/63) still gets control back to
+    // handle the failure: 63/64 clipping leaves the source enough to revert cleanly
+    for (const budget of [60_000, 120_000, 200_000]) {
+      const [okTight] = await meter.measure(await unknown.getAddress(), data, { gasLimit: budget });
+      expect(okTight, `budget ${budget}`).to.equal(false);
+    }
   });
 
   it("reverts when READ_CORE has no code (wrong chain): empty returndata", async function () {
