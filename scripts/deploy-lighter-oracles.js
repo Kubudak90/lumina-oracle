@@ -31,6 +31,10 @@
 // powers. `addMarket(0, ethPriceSource)` is guardian-only: one Safe transaction after phase
 // "guard" (lumina-monorepo harness/deploy).
 //
+// Crash recovery: before each deployment a write-ahead record goes into the deploy checkpoint
+// (LUMINA_DEPLOY_CHECKPOINT): commit, deployer nonce, init code hash, expected address. A run that
+// stopped between the transaction and the manifest write is adopted by the next run (or stopped
+// with a report if anything differs), never deployed twice.
 // Idempotent: a contract whose manifest entry has code is checked against the manifest and reused;
 // a phase that deploys nothing leaves sourceCommits as recorded. A phase that deploys continues
 // only from the lumina-oracle commit the manifest records (or records HEAD when none is). Every
@@ -108,6 +112,74 @@ async function boundedGas(estimate) {
   return buffered > cap ? cap : buffered;
 }
 
+const CHECKPOINT = () => {
+  const file = process.env.LUMINA_DEPLOY_CHECKPOINT;
+  if (!file) fail("set LUMINA_DEPLOY_CHECKPOINT to the deploy checkpoint path (write-ahead records)");
+  return path.resolve(file);
+};
+
+function readCheckpoint() {
+  const file = CHECKPOINT();
+  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+}
+
+function writeCheckpoint(data) {
+  const file = CHECKPOINT();
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`);
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * A deployment that was sent but never recorded (the run stopped between the transaction and the
+ * manifest write). Adopted only if the deployer's transaction at the recorded nonce is exactly the
+ * planned creation (same init code hash, successful, at the expected address, with code) and the
+ * deployer sent nothing else; otherwise the run stops with a recovery report. Nothing mined: the
+ * record is dropped and the contract is deployed normally.
+ */
+async function resolvePending(m, adopt) {
+  const cp = readCheckpoint();
+  const p = cp.pending;
+  if (!p) return;
+  if (p.kind !== "oracle") fail(`the deploy checkpoint has a pending ${p.kind} phase (${p.phase}); resolve it with the harness glue first`);
+  const report = (why) => fail(`recovery of "${p.phase}" stopped: ${why}. Pending record: ${JSON.stringify(p)}`);
+  const head = git(["rev-parse", "HEAD"]);
+  if (head !== p.commit) report(`lumina-oracle HEAD ${head} is not the commit ${p.commit} that sent it`);
+  if (!eq(p.deployer, m.deployer)) report("the deployer differs from the manifest");
+  for (let i = 0; i < 60; i++) {
+    const [latest, pending] = await Promise.all([
+      ethers.provider.getTransactionCount(p.deployer, "latest"),
+      ethers.provider.getTransactionCount(p.deployer, "pending"),
+    ]);
+    if (latest === pending) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  const nonce = await ethers.provider.getTransactionCount(p.deployer, "latest");
+  if (nonce === p.startNonce) {
+    console.log(`recovery: "${p.phase}" was never mined; record dropped`);
+    delete cp.pending;
+    writeCheckpoint(cp);
+    return;
+  }
+  if (nonce !== p.startNonce + 1) report(`the deployer sent ${nonce - p.startNonce} transaction(s) from nonce ${p.startNonce}, the record planned 1`);
+  let tx = null;
+  const head2 = await ethers.provider.getBlockNumber();
+  for (let n = p.startBlock; n <= head2 && !tx; n++) {
+    const block = await ethers.provider.getBlock(n, true);
+    tx = block.prefetchedTransactions.find((t) => eq(t.from, p.deployer) && t.nonce === p.startNonce) ?? null;
+  }
+  if (!tx) report(`no transaction of the deployer at nonce ${p.startNonce} since block ${p.startBlock}`);
+  const receipt = await ethers.provider.getTransactionReceipt(tx.hash);
+  if (receipt.status !== 1) report(`transaction ${tx.hash} at the planned nonce reverted`);
+  if (tx.to !== null || ethers.keccak256(tx.data) !== p.plan[0].dataHash) report(`transaction ${tx.hash} is not the planned ${p.name} creation`);
+  if (!eq(receipt.contractAddress, p.creates[0])) report(`${tx.hash} created ${receipt.contractAddress}, expected ${p.creates[0]}`);
+  const code = await ethers.provider.getCode(p.creates[0]);
+  if (code === "0x") report(`no code at ${p.creates[0]}`);
+  if (m.contracts[p.key].address) report(`contracts.${p.key} is already set (${m.contracts[p.key].address})`);
+  console.log(`recovery: adopted ${p.name} ${p.creates[0]} from ${tx.hash} (block ${receipt.blockNumber})`);
+  adopt(p.key, p.creates[0], code, receipt.blockNumber);
+}
+
 async function main() {
   const phase = process.env.LUMINA_ORACLE_PHASE;
   if (!PHASES.includes(phase)) fail(`set LUMINA_ORACLE_PHASE to one of ${PHASES.join(", ")}`);
@@ -173,27 +245,63 @@ async function main() {
     checked = true;
   };
 
+  // Write-ahead record (deploy checkpoint, `pending`): written before every deployment, cleared
+  // once the manifest holds the verified result. A run that stopped in between is recovered at the
+  // start of the next run (resolvePending), never deployed twice.
+  const recordAhead = (key, name, deployData, nonce, expected) => {
+    writeCheckpoint({
+      ...readCheckpoint(),
+      pending: {
+        kind: "oracle",
+        phase: `oracle ${phase}: ${key}`,
+        oraclePhase: phase,
+        key,
+        name,
+        repo: REPO,
+        commit: git(["rev-parse", "HEAD"]),
+        deployer: m.deployer,
+        startNonce: nonce,
+        startBlock: startBlock,
+        plan: [{ nonce, to: null, dataHash: ethers.keccak256(deployData) }],
+        creates: [expected],
+      },
+    });
+  };
+  const adopt = (key, address, code, minedIn) => {
+    m.contracts[key].address = address;
+    m.contracts[key].codehash = ethers.keccak256(code);
+    if (m.deploymentBlock === null) m.deploymentBlock = minedIn;
+    if (!m.sourceCommits[REPO]) m.sourceCommits[REPO] = git(["rev-parse", "HEAD"]);
+    mf.save();
+    const cp = readCheckpoint();
+    delete cp.pending;
+    writeCheckpoint(cp);
+  };
+
   const deploy = async (key, name, args) => {
     beforeDeploy();
     console.log(`deploying ${name}`);
     const factory = await ethers.getContractFactory(name, deployer);
     const request = await factory.getDeployTransaction(...args);
     const gasLimit = await boundedGas(await ethers.provider.estimateGas({ ...request, from: deployer.address }));
-    const contract = await factory.deploy(...args, { gasLimit });
+    const nonce = await ethers.provider.getTransactionCount(deployer.address, "pending");
+    const expected = ethers.getCreateAddress({ from: deployer.address, nonce });
+    recordAhead(key, name, request.data, nonce, expected);
+    const contract = await factory.deploy(...args, { gasLimit, nonce });
     const receipt = await contract.deploymentTransaction().wait();
     if (receipt.status !== 1) fail(`${name} deployment reverted (${receipt.hash})`);
+    if (process.env.LUMINA_TEST_CRASH_AFTER_MINED === "true") {
+      console.error(`TEST: simulated crash after ${name} was mined (${receipt.hash}), before the manifest write`);
+      process.exit(3);
+    }
     const address = await contract.getAddress();
-    if (!eq(receipt.contractAddress, address)) fail(`${name}: receipt contractAddress ${receipt.contractAddress} != ${address}`);
+    if (!eq(receipt.contractAddress, address) || !eq(address, expected)) fail(`${name}: deployed at ${receipt.contractAddress}, expected ${expected}`);
     const code = await ethers.provider.getCode(address);
     if (code === "0x") fail(`${name}: no code at ${address}`);
     gasLog.push({ name, gasLimit, gasUsed: receipt.gasUsed, hash: receipt.hash });
     console.log(`  ${name} ${address} (tx ${receipt.hash}, gas ${receipt.gasUsed} / limit ${gasLimit})`);
-    // Checkpoint: verified on-chain, then written.
-    m.contracts[key].address = address;
-    m.contracts[key].codehash = ethers.keccak256(code);
-    if (m.deploymentBlock === null) m.deploymentBlock = startBlock + 1;
-    if (!m.sourceCommits[REPO]) m.sourceCommits[REPO] = git(["rev-parse", "HEAD"]);
-    mf.save();
+    // Checkpoint: verified on-chain, then written; the write-ahead record is cleared.
+    adopt(key, address, code, receipt.blockNumber);
     return address;
   };
   const existing = async (key) => {
@@ -203,6 +311,8 @@ async function main() {
     if (hash !== entry.codehash) fail(`contracts.${key} ${entry.address}: codehash ${hash} != manifest ${entry.codehash}`);
     return entry.address;
   };
+
+  await resolvePending(m, adopt);
 
   // ======================================================================== phase "sources"
   let ethSource = await existing("ethPriceSource");
