@@ -1,17 +1,22 @@
-// Lighter EVM devnet oracle deployment (spec 3.2; S4c decision 1).
+// Lighter EVM devnet oracle deployment (spec 3.2; plan.md S4c decisions, deploy order).
 //
-// Deploys, before the core deploy, the five oracle contracts of the Lighter devnet and records them
-// in the deployment manifest (lumina-monorepo `deployments/<env>.json`, loaded and validated with
-// the monorepo loader `deployments/index.mjs`):
-//   - LighterCorePriceSource  ETH perp, Core market 0, prices WETH   (contracts.ethPriceSource)
-//   - FixedPriceSource        $1.00, prices USDC                     (contracts.usdcPriceSource)
-//   - LuminaPriceGuard        guardian Safe, keeper bots.keeper      (contracts.priceGuard)
-//   - LighterDualOracle       asset USDC / collateral WETH           (contracts.dualOracleUsdcWeth)
-//   - LighterDualOracle       asset WETH / collateral USDC           (contracts.dualOracleWethUsdc)
-// The core (lumina-core scripts/lighter) and isolated deploys only read these addresses.
+// Deploys the oracle contracts of the Lighter devnet in two phases and records them in the
+// deployment manifest (lumina-monorepo `deployments/<env>.json`, loaded and validated with the
+// monorepo loader `deployments/index.mjs`):
+//
+//   LUMINA_ORACLE_PHASE=sources (before the core market)
+//     - LighterCorePriceSource  ETH perp, Core market 0, prices WETH   (contracts.ethPriceSource)
+//     - FixedPriceSource        $1.00, prices USDC                     (contracts.usdcPriceSource)
+//   LUMINA_ORACLE_PHASE=guard (after lumina-core deployMarket(): the PoolAddressesProvider exists)
+//     - LuminaPriceGuard        the manifest's PoolAddressesProvider, guardian Safe, keeper
+//                               bots.keeper, bounds from oracle.guard   (contracts.priceGuard)
+//     - LighterDualOracle       asset USDC / collateral WETH           (contracts.dualOracleUsdcWeth)
+//     - LighterDualOracle       asset WETH / collateral USDC           (contracts.dualOracleWethUsdc)
+// The core (lumina-core scripts/lighter) and isolated deploys only read these addresses. No address
+// is predicted: the guard is built against the provider the core deploy recorded and verified.
 //
 // Usage (the chain comes from the manifest; the RPC URL from the env var the manifest names):
-//   LUMINA_MANIFEST=/path/to/manifest.json LIGHTER_DEVNET_RPC_URL=http://... \
+//   LUMINA_ORACLE_PHASE=sources LUMINA_MANIFEST=/path/to/manifest.json LIGHTER_DEVNET_RPC_URL=... \
 //     npx hardhat run scripts/deploy-lighter-oracles.js --network lighterDevnet
 // Optional:
 //   LUMINA_MANIFEST_LOADER  path to deployments/index.mjs (default: the monorepo submodule layout,
@@ -23,19 +28,14 @@
 // signer for the deployer key (S12).
 //
 // Guard market 0: the guardian is the Safe from construction, so the deployer never holds guard
-// powers. `addMarket(0, ethPriceSource)` is guardian-only and is therefore one Safe transaction,
-// executed after this script and before the core deploy (lumina-monorepo harness/deploy).
+// powers. `addMarket(0, ethPriceSource)` is guardian-only: one Safe transaction after phase
+// "guard" (lumina-monorepo harness/deploy).
 //
-// The guard pins the Aave PoolAddressesProvider (IPriceOracleSentinel.ADDRESSES_PROVIDER), which
-// the core deploy creates later: AaveV3SetupBatch is the deployer's next CREATE after this script
-// and creates the provider as its first CREATE, so
-//   provider = CREATE(CREATE(deployer, nonceAfterThisScript), 1).
-// The deployer must send nothing between this script and the core deploy; the core script checks
-// the prediction before its first transaction. If the manifest already has a provider (a guard
-// redeploy against an existing market) that address is used instead.
-//
-// Idempotent: a contract whose manifest entry has code is checked against the manifest and reused.
-// The manifest is written (validated, atomically) after every deployment.
+// Idempotent: a contract whose manifest entry has code is checked against the manifest and reused;
+// a phase that deploys nothing leaves sourceCommits as recorded. A phase that deploys continues
+// only from the lumina-oracle commit the manifest records (or records HEAD when none is). Every
+// deployment is checked on-chain (receipt status, code, codehash) before the manifest is written
+// (validated, atomically).
 // Gas: every transaction has an explicit limit, estimate + 25%, capped at the EIP-7825 per-tx cap.
 
 const hre = require("hardhat");
@@ -52,6 +52,7 @@ const READ_GAS_STIPEND = 100_000n; // gas forwarded to READ_CORE (LighterCorePri
 const CORE_MARKET_ID = 0; // ETH perp
 const USD_PRICE8 = 100_000_000n;
 const REPO = "lumina-oracle";
+const PHASES = ["sources", "guard"];
 
 const DUALS = [
   { key: "dualOracleUsdcWeth", asset: "USDC", collateral: "WETH" },
@@ -77,15 +78,6 @@ function git(args) {
   return execFileSync("git", args, { cwd: path.resolve(__dirname, ".."), encoding: "utf8" }).trim();
 }
 
-function requireCleanCheckout() {
-  if (git(["status", "--porcelain"]) === "") return;
-  if (process.env.LUMINA_ALLOW_DIRTY === "true") {
-    console.log("WARNING: lumina-oracle checkout has uncommitted changes (LUMINA_ALLOW_DIRTY=true)");
-    return;
-  }
-  fail("lumina-oracle checkout has uncommitted changes; commit first (sourceCommits must match the build)");
-}
-
 class ManifestFile {
   constructor(loader, file) {
     this.loader = loader;
@@ -105,8 +97,7 @@ class ManifestFile {
 
 async function hasCode(address) {
   if (!address) return false;
-  const code = await ethers.provider.getCode(address);
-  return code !== "0x";
+  return (await ethers.provider.getCode(address)) !== "0x";
 }
 
 async function boundedGas(estimate) {
@@ -117,20 +108,9 @@ async function boundedGas(estimate) {
   return buffered > cap ? cap : buffered;
 }
 
-async function deploy(deployer, name, args, gasLog) {
-  const factory = await ethers.getContractFactory(name, deployer);
-  const request = await factory.getDeployTransaction(...args);
-  const gasLimit = await boundedGas(await ethers.provider.estimateGas({ ...request, from: deployer.address }));
-  const contract = await factory.deploy(...args, { gasLimit });
-  const receipt = await contract.deploymentTransaction().wait();
-  if (receipt.status !== 1) fail(`${name} deployment reverted (${receipt.hash})`);
-  const address = await contract.getAddress();
-  gasLog.push({ name, gasLimit, gasUsed: receipt.gasUsed, hash: receipt.hash });
-  console.log(`  ${name} ${address} (gas ${receipt.gasUsed} / limit ${gasLimit})`);
-  return contract;
-}
-
 async function main() {
+  const phase = process.env.LUMINA_ORACLE_PHASE;
+  if (!PHASES.includes(phase)) fail(`set LUMINA_ORACLE_PHASE to one of ${PHASES.join(", ")}`);
   const manifestPath = process.env.LUMINA_MANIFEST;
   if (!manifestPath) fail("set LUMINA_MANIFEST to the manifest path");
   const loader = await loadLoader();
@@ -142,10 +122,9 @@ async function main() {
   if (BigInt(m.chainId) !== network.chainId) {
     fail(`manifest chainId ${m.chainId} != RPC chain ${network.chainId} (network ${hre.network.name})`);
   }
-  console.log(`deploy-lighter-oracles: ${m.environment} (chain ${m.chainId}), manifest ${mf.file}`);
+  console.log(`deploy-lighter-oracles (${phase}): ${m.environment} (chain ${m.chainId}), manifest ${mf.file}`);
 
   // ---- inputs
-  const deployerAddress = m.deployer;
   const safe = m.safe?.address;
   const keeper = m.bots?.keeper;
   if (!safe || !(await hasCode(safe))) fail("safe.address must be set and hold code (create the Safe first)");
@@ -156,7 +135,6 @@ async function main() {
   for (const [symbol, a] of [["WETH", WETH], ["USDC", USDC]]) {
     if (!(await hasCode(a))) fail(`no code at assets.${symbol} ${a}`);
   }
-
   const coreIndex = m.oracle.coreSources.findIndex((s) => eq(s.asset, WETH) && s.marketId === CORE_MARKET_ID);
   if (coreIndex < 0) fail("oracle.coreSources needs the WETH source of Core market 0");
   const core = m.oracle.coreSources[coreIndex];
@@ -165,8 +143,7 @@ async function main() {
   }
   const fixedIndex = m.oracle.fixedSources.findIndex((s) => eq(s.asset, USDC));
   if (fixedIndex < 0) fail("oracle.fixedSources needs the USDC source");
-  const fixed = m.oracle.fixedSources[fixedIndex];
-  if (BigInt(fixed.price8) !== USD_PRICE8) fail(`oracle.fixedSources[${fixedIndex}].price8 must be ${USD_PRICE8}`);
+  if (BigInt(m.oracle.fixedSources[fixedIndex].price8) !== USD_PRICE8) fail(`oracle.fixedSources[${fixedIndex}].price8 must be ${USD_PRICE8}`);
   const g = m.oracle.guard;
   if (!g.marketIds.includes(CORE_MARKET_ID)) fail("oracle.guard.marketIds must include 0");
   const dualIndex = {};
@@ -176,41 +153,76 @@ async function main() {
     dualIndex[d.key] = i;
   }
 
-  const deployer = await ethers.getSigner(deployerAddress);
+  const deployer = await ethers.getSigner(m.deployer);
   const gasLog = [];
   const startBlock = await ethers.provider.getBlockNumber();
-  let clean = false;
-  const ensureClean = () => {
-    if (!clean) requireCleanCheckout();
-    clean = true;
+
+  // A deployment continues only from a clean checkout at the commit that started it.
+  let checked = false;
+  const beforeDeploy = () => {
+    if (checked) return;
+    if (git(["status", "--porcelain"]) !== "") {
+      if (process.env.LUMINA_ALLOW_DIRTY === "true") console.log("WARNING: lumina-oracle checkout has uncommitted changes (LUMINA_ALLOW_DIRTY=true)");
+      else fail("lumina-oracle checkout has uncommitted changes; commit first (sourceCommits must match the build)");
+    }
+    const head = git(["rev-parse", "HEAD"]);
+    const recorded = m.sourceCommits[REPO];
+    if (recorded && recorded !== head) {
+      fail(`lumina-oracle HEAD ${head} differs from the manifest sourceCommits ${recorded}: continue a partial deploy from the commit that started it`);
+    }
+    checked = true;
   };
-  const record = async (key, address) => {
+
+  const deploy = async (key, name, args) => {
+    beforeDeploy();
+    console.log(`deploying ${name}`);
+    const factory = await ethers.getContractFactory(name, deployer);
+    const request = await factory.getDeployTransaction(...args);
+    const gasLimit = await boundedGas(await ethers.provider.estimateGas({ ...request, from: deployer.address }));
+    const contract = await factory.deploy(...args, { gasLimit });
+    const receipt = await contract.deploymentTransaction().wait();
+    if (receipt.status !== 1) fail(`${name} deployment reverted (${receipt.hash})`);
+    const address = await contract.getAddress();
+    if (!eq(receipt.contractAddress, address)) fail(`${name}: receipt contractAddress ${receipt.contractAddress} != ${address}`);
     const code = await ethers.provider.getCode(address);
+    if (code === "0x") fail(`${name}: no code at ${address}`);
+    gasLog.push({ name, gasLimit, gasUsed: receipt.gasUsed, hash: receipt.hash });
+    console.log(`  ${name} ${address} (tx ${receipt.hash}, gas ${receipt.gasUsed} / limit ${gasLimit})`);
+    // Checkpoint: verified on-chain, then written.
     m.contracts[key].address = address;
     m.contracts[key].codehash = ethers.keccak256(code);
     if (m.deploymentBlock === null) m.deploymentBlock = startBlock + 1;
-    m.sourceCommits[REPO] = git(["rev-parse", "HEAD"]);
+    if (!m.sourceCommits[REPO]) m.sourceCommits[REPO] = git(["rev-parse", "HEAD"]);
     mf.save();
+    return address;
   };
   const existing = async (key) => {
-    const a = m.contracts[key]?.address;
-    return a && (await hasCode(a)) ? a : null;
+    const entry = m.contracts[key];
+    if (!entry?.address || !(await hasCode(entry.address))) return null;
+    const hash = ethers.keccak256(await ethers.provider.getCode(entry.address));
+    if (hash !== entry.codehash) fail(`contracts.${key} ${entry.address}: codehash ${hash} != manifest ${entry.codehash}`);
+    return entry.address;
   };
 
-  // ---- 1. LighterCorePriceSource (ETH perp index, WETH)
+  // ======================================================================== phase "sources"
   let ethSource = await existing("ethPriceSource");
-  if (!ethSource) {
-    ensureClean();
-    console.log("deploying LighterCorePriceSource (Core market 0)");
-    const c = await deploy(
-      deployer,
-      "LighterCorePriceSource",
-      [CORE_MARKET_ID, core.priceDecimals, BigInt(core.minPrice8), BigInt(core.maxPrice8), READ_GAS_STIPEND, "ETH / USD (Lighter Core market 0 index)"],
-      gasLog,
-    );
-    ethSource = await c.getAddress();
-    await record("ethPriceSource", ethSource);
+  let usdcSource = await existing("usdcPriceSource");
+  if (phase === "sources") {
+    if (!ethSource) {
+      ethSource = await deploy("ethPriceSource", "LighterCorePriceSource", [
+        CORE_MARKET_ID,
+        core.priceDecimals,
+        BigInt(core.minPrice8),
+        BigInt(core.maxPrice8),
+        READ_GAS_STIPEND,
+        "ETH / USD (Lighter Core market 0 index)",
+      ]);
+    }
+    if (!usdcSource) {
+      usdcSource = await deploy("usdcPriceSource", "FixedPriceSource", [USD_PRICE8, "USDC / USD (fixed $1.00)"]);
+    }
   }
+  if (!ethSource || !usdcSource) fail('the price sources are not deployed (run phase "sources" first)');
   const eth = await ethers.getContractAt("LighterCorePriceSource", ethSource);
   if (
     Number(await eth.MARKET_ID()) !== CORE_MARKET_ID ||
@@ -218,118 +230,91 @@ async function main() {
     (await eth.MIN_PRICE()) !== BigInt(core.minPrice8) ||
     (await eth.MAX_PRICE()) !== BigInt(core.maxPrice8)
   ) {
-    fail(`existing LighterCorePriceSource ${ethSource} does not match oracle.coreSources[${coreIndex}]`);
+    fail(`LighterCorePriceSource ${ethSource} does not match oracle.coreSources[${coreIndex}]`);
   }
   console.log(`  ETH / USD = ${await eth.latestAnswer()} (8 decimals)`);
-  m.oracle.coreSources[coreIndex].address = ethSource;
-  mf.save();
-
-  // ---- 2. FixedPriceSource ($1.00, USDC)
-  let usdcSource = await existing("usdcPriceSource");
-  if (!usdcSource) {
-    ensureClean();
-    console.log("deploying FixedPriceSource ($1.00)");
-    const c = await deploy(deployer, "FixedPriceSource", [USD_PRICE8, "USDC / USD (fixed $1.00)"], gasLog);
-    usdcSource = await c.getAddress();
-    await record("usdcPriceSource", usdcSource);
-  }
   const usd = await ethers.getContractAt("FixedPriceSource", usdcSource);
-  if ((await usd.PRICE()) !== USD_PRICE8) fail(`existing FixedPriceSource ${usdcSource} price != ${USD_PRICE8}`);
+  if ((await usd.PRICE()) !== USD_PRICE8) fail(`FixedPriceSource ${usdcSource} price != ${USD_PRICE8}`);
+  m.oracle.coreSources[coreIndex].address = ethSource;
   m.oracle.fixedSources[fixedIndex].address = usdcSource;
   mf.save();
 
-  // ---- 3. LuminaPriceGuard
-  let guardAddress = await existing("priceGuard");
-  let predicted = null;
-  if (!guardAddress) {
-    ensureClean();
-    let provider = m.contracts.poolAddressesProvider?.address;
-    if (provider && (await hasCode(provider))) {
-      console.log(`guard: pinning the existing PoolAddressesProvider ${provider}`);
-    } else {
-      const remaining = 1 + (await Promise.all(DUALS.map((d) => existing(d.key)))).filter((a) => !a).length;
-      const nonceNow = await ethers.provider.getTransactionCount(deployerAddress, "latest");
-      const nonceAfter = nonceNow + remaining;
-      const setupBatch = ethers.getCreateAddress({ from: deployerAddress, nonce: nonceAfter });
-      provider = ethers.getCreateAddress({ from: setupBatch, nonce: 1 });
-      predicted = { nonceAfter, provider };
-      console.log(`guard: PoolAddressesProvider predicted at ${provider} (deployer nonce ${nonceAfter} after this script)`);
+  // ======================================================================== phase "guard"
+  if (phase === "guard") {
+    // The core market exists and is the manifest's: provider code and codehash, its price oracle,
+    // and the AaveOracle sources set to the phase-1 sources.
+    const providerAddress = await existing("poolAddressesProvider");
+    const oracleAddress = await existing("aaveOracle");
+    if (!providerAddress || !oracleAddress) fail("the core market is not deployed (run lumina-core deployMarket() first)");
+    const provider = new ethers.Contract(providerAddress, ["function getPriceOracle() view returns (address)"], ethers.provider);
+    if (!eq(await provider.getPriceOracle(), oracleAddress)) fail("PoolAddressesProvider.getPriceOracle() is not contracts.aaveOracle");
+    const aaveOracle = new ethers.Contract(oracleAddress, ["function getSourceOfAsset(address) view returns (address)"], ethers.provider);
+    if (!eq(await aaveOracle.getSourceOfAsset(WETH), ethSource) || !eq(await aaveOracle.getSourceOfAsset(USDC), usdcSource)) {
+      fail("AaveOracle sources are not the manifest price sources (run lumina-core deployMarket())");
     }
-    console.log("deploying LuminaPriceGuard");
-    const c = await deploy(
-      deployer,
-      "LuminaPriceGuard",
-      [provider, safe, keeper, g.maxRefAgeSec, g.maxDeviationBps, g.maxCorePriceAgeSec],
-      gasLog,
-    );
-    guardAddress = await c.getAddress();
-    await record("priceGuard", guardAddress);
-  }
-  const guard = await ethers.getContractAt("LuminaPriceGuard", guardAddress);
-  if (!eq(await guard.guardian(), safe)) fail(`guard ${guardAddress}: guardian is not the Safe`);
-  if (!eq(await guard.pendingGuardian(), ethers.ZeroAddress)) fail(`guard ${guardAddress}: pending guardian set`);
-  if (!eq(await guard.keeper(), keeper)) fail(`guard ${guardAddress}: keeper is not bots.keeper`);
-  if (
-    Number(await guard.maxRefAge()) !== g.maxRefAgeSec ||
-    Number(await guard.maxDeviationBps()) !== g.maxDeviationBps ||
-    Number(await guard.maxCorePriceAge()) !== g.maxCorePriceAgeSec
-  ) {
-    fail(`guard ${guardAddress}: parameters differ from oracle.guard`);
-  }
-  m.roles.guard.guardian = safe;
-  m.roles.guard.keeper = keeper;
-  mf.save();
 
-  // ---- 4. LighterDualOracle x2
-  const sourceOf = { WETH: ethSource, USDC: usdcSource };
-  const tokenOf = { WETH, USDC };
-  for (const d of DUALS) {
-    let address = await existing(d.key);
-    if (!address) {
-      ensureClean();
-      console.log(`deploying LighterDualOracle ${d.asset}/${d.collateral}`);
-      const c = await deploy(
-        deployer,
-        "LighterDualOracle",
-        [tokenOf[d.asset], tokenOf[d.collateral], sourceOf[d.asset], sourceOf[d.collateral], guardAddress, `Lighter ${d.asset}/${d.collateral} (Core index)`],
-        gasLog,
-      );
-      address = await c.getAddress();
-      await record(d.key, address);
+    let guardAddress = await existing("priceGuard");
+    if (!guardAddress) {
+      guardAddress = await deploy("priceGuard", "LuminaPriceGuard", [
+        providerAddress,
+        safe,
+        keeper,
+        g.maxRefAgeSec,
+        g.maxDeviationBps,
+        g.maxCorePriceAgeSec,
+      ]);
     }
-    const o = await ethers.getContractAt("LighterDualOracle", address);
-    const wiring = [
-      [await o.ASSET(), tokenOf[d.asset]],
-      [await o.COLLATERAL(), tokenOf[d.collateral]],
-      [await o.ASSET_PRICE_SOURCE(), sourceOf[d.asset]],
-      [await o.COLLATERAL_PRICE_SOURCE(), sourceOf[d.collateral]],
-      [await o.GUARD(), guardAddress],
-    ];
-    if (!wiring.every(([a, b]) => eq(a, b))) fail(`dual oracle ${d.key} ${address}: wiring differs`);
-    m.oracle.dualOracles[dualIndex[d.key]].address = address;
+    const guard = await ethers.getContractAt("LuminaPriceGuard", guardAddress);
+    if (!eq(await guard.ADDRESSES_PROVIDER(), providerAddress)) fail(`guard ${guardAddress}: ADDRESSES_PROVIDER is not the manifest provider`);
+    if (!eq(await guard.guardian(), safe)) fail(`guard ${guardAddress}: guardian is not the Safe`);
+    if (!eq(await guard.pendingGuardian(), ethers.ZeroAddress)) fail(`guard ${guardAddress}: pending guardian set`);
+    if (!eq(await guard.keeper(), keeper)) fail(`guard ${guardAddress}: keeper is not bots.keeper`);
+    if (
+      Number(await guard.maxRefAge()) !== g.maxRefAgeSec ||
+      Number(await guard.maxDeviationBps()) !== g.maxDeviationBps ||
+      Number(await guard.maxCorePriceAge()) !== g.maxCorePriceAgeSec
+    ) {
+      fail(`guard ${guardAddress}: parameters differ from oracle.guard`);
+    }
+    m.roles.guard.guardian = safe;
+    m.roles.guard.keeper = keeper;
     mf.save();
-  }
 
-  // ---- the guard's provider prediction holds only if nothing else was sent by the deployer
-  if (predicted) {
-    const nonceNow = await ethers.provider.getTransactionCount(deployerAddress, "latest");
-    if (nonceNow !== predicted.nonceAfter) {
-      fail(`deployer nonce is ${nonceNow}, the guard assumed ${predicted.nonceAfter}: reset the guard and dual oracles in the manifest and rerun`);
+    const sourceOf = { WETH: ethSource, USDC: usdcSource };
+    const tokenOf = { WETH, USDC };
+    for (const d of DUALS) {
+      let address = await existing(d.key);
+      if (!address) {
+        address = await deploy(d.key, "LighterDualOracle", [
+          tokenOf[d.asset],
+          tokenOf[d.collateral],
+          sourceOf[d.asset],
+          sourceOf[d.collateral],
+          guardAddress,
+          `Lighter ${d.asset}/${d.collateral} (Core index)`,
+        ]);
+      }
+      const o = await ethers.getContractAt("LighterDualOracle", address);
+      const wiring = [
+        [await o.ASSET(), tokenOf[d.asset]],
+        [await o.COLLATERAL(), tokenOf[d.collateral]],
+        [await o.ASSET_PRICE_SOURCE(), sourceOf[d.asset]],
+        [await o.COLLATERAL_PRICE_SOURCE(), sourceOf[d.collateral]],
+        [await o.GUARD(), guardAddress],
+      ];
+      if (!wiring.every(([a, b]) => eq(a, b))) fail(`dual oracle ${d.key} ${address}: wiring differs`);
+      m.oracle.dualOracles[dualIndex[d.key]].address = address;
+      mf.save();
     }
-  }
-  const provider = await guard.ADDRESSES_PROVIDER();
-  console.log(`guard ADDRESSES_PROVIDER = ${provider}`);
 
-  // ---- wiring invariant (plan.md): one LighterCorePriceSource for WETH everywhere it is read
-  const [guarded, market0Source] = await guard.getMarket(CORE_MARKET_ID);
-  if (guarded && !eq(market0Source, ethSource)) fail(`guard market 0 source ${market0Source} != ${ethSource}`);
-  if (!guarded) {
-    console.log(`NEXT (Safe ${safe}): guard.addMarket(${CORE_MARKET_ID}, ${ethSource}) before the core deploy`);
+    // Wiring invariant (plan.md): one LighterCorePriceSource for WETH wherever it is read.
+    const [guarded, market0Source] = await guard.getMarket(CORE_MARKET_ID);
+    if (guarded && !eq(market0Source, ethSource)) fail(`guard market 0 source ${market0Source} != ${ethSource}`);
+    if (!guarded) console.log(`NEXT (Safe ${safe}): guard.addMarket(${CORE_MARKET_ID}, ${ethSource})`);
   }
 
   const total = gasLog.reduce((s, x) => s + x.gasUsed, 0n);
-  const max = gasLog.reduce((s, x) => (x.gasUsed > s ? x.gasUsed : s), 0n);
-  console.log(`deploy-lighter-oracles: OK (${gasLog.length} transaction(s), gas used ${total}, max ${max})`);
+  console.log(`deploy-lighter-oracles (${phase}): OK (${gasLog.length} transaction(s), gas used ${total})`);
 }
 
 main().catch((error) => {
