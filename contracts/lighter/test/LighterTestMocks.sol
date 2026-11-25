@@ -171,3 +171,92 @@ contract GasMeter {
         gasUsed = before - gasleft();
     }
 }
+
+/// @notice Pair-like consumer of the dual oracle, mirroring `LightlendPairCore._updateExchangeRate`:
+/// `getPrices()` is called at most once per block (cache keyed on `block.timestamp`) and the returned
+/// flag is stored, so it holds for every later call in that block. `liquidateLike` spends
+/// `gasBefore`, refreshes the cache like `liquidate()`, then spends `gasAfter` (the rest of a
+/// liquidation; the pair accrues interest before the rate update and does the transfers after).
+contract PairLikeOracleCaller {
+    struct Cache {
+        uint64 lastTimestamp;
+        bool oneOracleBad;
+        uint184 rate;
+    }
+
+    address public immutable ORACLE;
+    Cache public cache;
+
+    event UpdateExchangeRate(bool oneOracleBad, uint256 rate);
+
+    constructor(address oracle) {
+        ORACLE = oracle;
+    }
+
+    function updateExchangeRate() external returns (bool isBorrowAllowed, uint256 rate) {
+        return _update();
+    }
+
+    function liquidateLike(uint256 gasBefore, uint256 gasAfter) external returns (uint256 rate) {
+        uint256 start = gasleft();
+        while (start - gasleft() < gasBefore) {}
+        (, rate) = _update();
+        start = gasleft();
+        while (start - gasleft() < gasAfter) {}
+    }
+
+    function _update() internal returns (bool isBorrowAllowed, uint256 rate) {
+        Cache memory c = cache;
+        if (c.lastTimestamp != block.timestamp) {
+            (bool bad, uint256 low,) = IDualOracleLike(ORACLE).getPrices();
+            c = Cache(uint64(block.timestamp), bad, uint184(low));
+            cache = c;
+            emit UpdateExchangeRate(bad, low);
+        }
+        return (!c.oneOracleBad, c.rate);
+    }
+}
+
+/// @notice Calls the dual oracle's `getPrices()` with exactly `gasLimit` gas (the caller must have
+/// 64/63 of it) and reports success, the return or revert data, and the gas the call consumed.
+contract OracleGasProbe {
+    function probe(address oracle, uint256 gasLimit)
+        external
+        view
+        returns (bool ok, bytes memory ret, uint256 gasUsed)
+    {
+        bytes memory data = abi.encodeWithSelector(IDualOracleLike.getPrices.selector);
+        uint256 before = gasleft();
+        (ok, ret) = oracle.staticcall{gas: gasLimit}(data);
+        gasUsed = before - gasleft();
+    }
+}
+
+/// @notice Test-only READ_CORE stand-in that charges ~20k gas per market-info read (the cost the
+/// Lighter docs give for the real precompile; `MockReadCore` costs a few thousand) and, like the real
+/// precompile, burns all forwarded gas on a failed read. Answers perp market 0 only, with a settable
+/// index price. Etched at READ_CORE with hardhat_setCode.
+contract MockReadCoreCostly {
+    uint256 internal constant READ_GAS = 20_000;
+    uint64 public indexPrice;
+
+    function setIndexPrice(uint64 price) external {
+        indexPrice = price;
+    }
+
+    fallback(bytes calldata input) external returns (bytes memory) {
+        uint256 start = gasleft();
+        if (input.length == 4 && uint16(bytes2(input[0:2])) == 0x0005 && uint16(bytes2(input[2:4])) == 0) {
+            bytes memory out = abi.encode(
+                uint8(0), uint32(1), uint32(5), uint32(20), uint32(5), uint64(1e6), uint64(1e6), uint32(50),
+                indexPrice, indexPrice
+            );
+            // burn until ~READ_GAS has been used in this frame; running out of gas fails the read
+            while (start - gasleft() < READ_GAS) {}
+            return out;
+        }
+        assembly {
+            invalid()
+        }
+    }
+}

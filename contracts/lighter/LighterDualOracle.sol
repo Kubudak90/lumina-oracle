@@ -30,7 +30,11 @@ interface ILighterBorrowGuard {
 /// `isBadData`, never move valuations. A failed source read reverts (no price, no fallback).
 /// The guard is called last, low-level, with at most `GUARD_CALL_GAS`; any failure (revert,
 /// out of gas, malformed return) counts as bad data, so a broken guard can block borrows but
-/// never `getPrices()` (and so never liquidations).
+/// never `getPrices()` (and so never liquidations). An answer other than "allowed" counts only
+/// if the guard was given the full `GUARD_CALL_GAS`; with less, the caller may have starved it
+/// (or a read inside it) on purpose, and a pair would cache that verdict for the whole block, so
+/// the call reverts `InsufficientGasForGuard` instead (audit N-ORA-01). Callers that can reach
+/// the guard (pair liquidations) must budget the full stipend on top of their own gas.
 contract LighterDualOracle is IDualOracle {
     uint256 public constant override ORACLE_PRECISION = 1e18;
     uint8 internal constant DECIMALS = 18;
@@ -61,6 +65,7 @@ contract LighterDualOracle is IDualOracle {
     error InvalidSourcePrice(address source, int256 price);
     error ZeroRate();
     error InvalidGuard();
+    error InsufficientGasForGuard();
 
     constructor(
         address asset,
@@ -94,7 +99,7 @@ contract LighterDualOracle is IDualOracle {
         // answers isBorrowAllowed() with a well-formed bool.
         _rate();
         if (address(guard).code.length == 0) revert InvalidGuard();
-        (bool ok, bool valid,) = _callGuard();
+        (bool ok, bool valid,,) = _callGuard();
         if (!ok || !valid) revert InvalidGuard();
     }
 
@@ -135,19 +140,26 @@ contract LighterDualOracle is IDualOracle {
         return uint256(answer);
     }
 
-    /// @dev Any guard failure counts as bad data.
+    /// @dev Any guard failure counts as bad data, but only once the guard had the full
+    /// `GUARD_CALL_GAS`: otherwise a not-allowed answer may be forged by withholding gas, so
+    /// revert. An allowed answer is accepted at any gas.
     function _isBadData() internal view returns (bool) {
-        (bool ok, bool valid, bool allowed) = _callGuard();
-        return !(ok && valid && allowed);
+        (bool ok, bool valid, bool allowed, uint256 forwarded) = _callGuard();
+        if (ok && valid && allowed) return false;
+        if (forwarded < GUARD_CALL_GAS) revert InsufficientGasForGuard();
+        return true;
     }
 
     /// @dev Forwards min(GUARD_CALL_GAS, gasleft − GUARD_GAS_RESERVE) and copies at most 32
     /// bytes of returndata, so neither a gas-burning nor an oversized response can starve this
     /// oracle (and the liquidation calling it). `valid` = exactly 32 bytes encoding 0 or 1.
-    function _callGuard() internal view returns (bool ok, bool valid, bool allowed) {
+    /// `forward` is the gas requested for the call; when it equals `GUARD_CALL_GAS` the guard
+    /// receives all of it, because the reserve exceeds the 1/64 the call keeps back plus the
+    /// cost of the call itself.
+    function _callGuard() internal view returns (bool ok, bool valid, bool allowed, uint256 forward) {
         uint256 available = gasleft();
-        if (available <= GUARD_GAS_RESERVE) return (false, false, false);
-        uint256 forward = available - GUARD_GAS_RESERVE;
+        if (available <= GUARD_GAS_RESERVE) return (false, false, false, 0);
+        forward = available - GUARD_GAS_RESERVE;
         if (forward > GUARD_CALL_GAS) forward = GUARD_CALL_GAS;
         address guard = address(GUARD);
         bytes4 selector = ILighterBorrowGuard.isBorrowAllowed.selector;
@@ -160,8 +172,8 @@ contract LighterDualOracle is IDualOracle {
             size := returndatasize()
             word := mload(ptr)
         }
-        if (!ok || size != 32 || word > 1) return (ok, false, false);
-        return (true, true, word == 1);
+        if (!ok || size != 32 || word > 1) return (ok, false, false, forward);
+        return (true, true, word == 1, forward);
     }
 
     function _normalize(uint256 rate) internal view returns (uint256) {
