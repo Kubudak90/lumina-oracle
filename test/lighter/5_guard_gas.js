@@ -84,9 +84,14 @@ async function build({ costlyReadCore }) {
 }
 
 /** Same oracle wiring over the settable MockBorrowGuard (failure modes). */
-async function buildWithMockGuard() {
-  const core = await etchReadCore();
-  await setMarket(core, 0, { indexPrice: 300_000n });
+async function buildWithMockGuard({ costlyReadCore = false } = {}) {
+  if (costlyReadCore) {
+    const core = await etchReadCore(MOCK_READ_CORE_COSTLY);
+    await core.setIndexPrice(300_000n);
+  } else {
+    const core = await etchReadCore();
+    await setMarket(core, 0, { indexPrice: 300_000n });
+  }
   const ethSource = await deploy("LighterCorePriceSource", 0, 2, 100n * E8, 100_000n * E8, DEFAULT_STIPEND, "ETH");
   const usdSource = await deploy("FixedPriceSource", E8, "USDC");
   const usdc = await deploy("MockDecimalsToken", 6);
@@ -282,6 +287,65 @@ describe("Lighter: LighterDualOracle guard gas (F2 / N-ORA-01)", function () {
       }
       console.log(`      [${label}] estimate ${estimate}; shipped limit ${shippedLimit} (gasUsed ${shipped.gasUsed}); minimum that succeeds ~${hi}, margin ~${shippedLimit - hi}`);
       expect(hi).to.be.lessThan(shippedLimit);
+    });
+  }
+
+  // Review r1, item 3: the shipped rule against a guard that consumes its whole stipend, so the
+  // work after the oracle call cannot reuse any of it.
+  for (const [before, after] of [
+    [0n, WORK],
+    [WORK, 0n],
+  ]) {
+    const label = `READ_CORE ~20k gas per read, ${before / 1000n}k gas before / ${after / 1000n}k after the rate update`;
+
+    it(`estimate with a fresh cache, inclusion one block later with a guard that burns its whole stipend: estimate + GUARD_CALL_GAS + 100,000 succeeds (${label})`, async function () {
+      const { mockGuard, oracle, caller, insufficientGas } = await buildWithMockGuard({ costlyReadCore: true });
+      const GUARD_CALL_GAS = await oracle.GUARD_CALL_GAS();
+      await caller.updateExchangeRate(); // non-zero cache slot, like a live pair's exchangeRateInfo
+      await mockGuard.setMode(Mode.BURN_GAS); // from now on the guard consumes everything it is given
+
+      // Block B: someone refreshes the pair's cache; the liquidator estimates against that block.
+      await network.provider.send("evm_setAutomine", [false]);
+      let estimate;
+      try {
+        await caller.updateExchangeRate({ gasLimit: 3_000_000 });
+        estimate = await caller.liquidateLike.estimateGas(before, after); // eth_estimateGas on the pending block
+        await network.provider.send("evm_mine", []);
+      } finally {
+        await network.provider.send("evm_setAutomine", [true]);
+      }
+      const blockB = await ethers.provider.getBlock("latest");
+      expect((await caller.cache()).lastTimestamp).to.equal(BigInt(blockB.timestamp));
+      expect(estimate, "the estimate skipped the oracle (fresh cache)").to.be.lessThan(WORK + 60_000n);
+
+      // Block B+1: the cache is stale, so the oracle runs and the guard burns GUARD_CALL_GAS.
+      const nextAt = blockB.timestamp + 1;
+      const sendAt = async (gasLimit) => {
+        await network.provider.send("evm_setNextBlockTimestamp", [nextAt]);
+        return trySend(caller, "liquidateLike", [before, after], gasLimit);
+      };
+      const shippedLimit = estimate + GUARD_CALL_GAS + 100_000n;
+      const shipped = await sendAt(shippedLimit);
+
+      // the smallest limit that succeeds in that block (measured before asserting, to report a shortfall)
+      let lo = estimate;
+      let hi = 3_000_000n;
+      expect((await sendAt(hi)).ok).to.equal(true);
+      while (hi - lo > 100n) {
+        const mid = (lo + hi) / 2n;
+        if ((await sendAt(mid)).ok) hi = mid;
+        else lo = mid;
+      }
+      console.log(`      [${label}] estimate ${estimate}; shipped limit ${shippedLimit} (ok=${shipped.ok}, gasUsed ${shipped.gasUsed}); minimum that succeeds ~${hi}, margin ~${shippedLimit - hi}`);
+      expect(shipped.ok, `shipped limit ${shippedLimit} vs minimum ~${hi}`).to.equal(true);
+      expect(shipped.cache.oneOracleBad).to.equal(true);
+      expect(shipped.cache.lastTimestamp).to.equal(BigInt(nextAt));
+      expect(hi).to.be.lessThan(shippedLimit);
+
+      // the old bot rule (estimate + 25%) reverts instead of caching bad data
+      const old = await sendAt(estimate + estimate / 4n);
+      expect(old.ok).to.equal(false);
+      expect(old.data).to.equal(insufficientGas);
     });
   }
 });
